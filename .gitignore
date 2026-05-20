@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+!.env.example
+.DS_Store
+*.log
+.playwright-cli/
+output/
+release/.cache/
+release/windows-student/
+release/*.zip
