@@ -17,6 +17,7 @@ import {
   Send,
   Settings2,
   Terminal,
+  Trash2,
   UserRound,
   Wifi,
   WifiOff,
@@ -56,6 +57,12 @@ type ChatMessage = {
 
 const MAX_ATTACHMENTS = 4;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const HISTORY_STORAGE_KEY = "huskylens:chatHistory";
+const HISTORY_LIMIT = 10;
+const initialAssistantMessage = {
+  role: "assistant" as const,
+  text: "허스키렌즈를 연결하고 카메라가 보는 장면에 대해 자유롭게 질문해 주세요. 인식 데이터를 함께 읽고 답변해 드립니다."
+};
 
 const defaultMcpUrl =
   localStorage.getItem("huskylens:mcpUrl") || "http://192.168.0.100:3000/sse";
@@ -74,14 +81,7 @@ function App() {
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(true);
   const [latestVisionContext, setLatestVisionContext] = useState<unknown>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      text: "허스키렌즈를 연결하고 카메라가 보는 장면에 대해 자유롭게 질문해 주세요. 인식 데이터를 함께 읽고 답변해 드립니다.",
-      at: Date.now()
-    }
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadStoredMessages());
   const [health, setHealth] = useState<ApiState<Record<string, unknown>>>({
     loading: true,
     error: "",
@@ -125,6 +125,9 @@ function App() {
     if (openaiApiKey) localStorage.setItem("huskylens:openaiApiKey", openaiApiKey);
     else localStorage.removeItem("huskylens:openaiApiKey");
   }, [openaiApiKey]);
+  useEffect(() => {
+    saveStoredMessages(messages);
+  }, [messages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -233,6 +236,7 @@ function App() {
         model,
         reasoningEffort,
         question: trimmed || "(첨부 이미지 참고)",
+        history: buildConversationHistory(messages),
         attachments: sentAttachments
       }
     );
@@ -295,6 +299,15 @@ function App() {
     }
   }
 
+  function clearConversation() {
+    const next = [createInitialAssistantMessage()];
+    setMessages(next);
+    setLatestVisionContext(null);
+    setRecognition({ loading: false, error: "", data: null });
+    setAnswer({ loading: false, error: "", data: null });
+    setStreamingId(null);
+  }
+
   return (
     <main className="relative z-10 min-h-screen">
       <div className="mx-auto flex min-h-screen w-full max-w-[1480px] flex-col px-4 py-5 sm:px-7 lg:px-10 lg:py-7">
@@ -319,6 +332,7 @@ function App() {
               connectedAt={connection.data?.connectedAt}
               mcpUrl={connection.data?.url}
               model={model}
+              onClearConversation={clearConversation}
             />
 
             <div
@@ -609,12 +623,14 @@ function SceneStrip({
   state,
   connectedAt,
   mcpUrl,
-  model
+  model,
+  onClearConversation
 }: {
   state: "live" | "ready" | "idle";
   connectedAt?: string;
   mcpUrl?: string;
   model: string;
+  onClearConversation: () => void;
 }) {
   const map = {
     live: {
@@ -664,6 +680,14 @@ function SceneStrip({
         )}
           <span className="text-silver-400">모델</span>
           <span className="text-silver-700">{model}</span>
+          <button
+            type="button"
+            onClick={onClearConversation}
+            className="inline-flex items-center gap-1.5 rounded-full border border-silver-200 bg-white/70 px-2.5 py-1 text-[10px] font-semibold text-silver-600 shadow-crisp transition hover:border-alert/30 hover:text-alert-deep"
+          >
+            <Trash2 size={11} />
+            대화 초기화
+          </button>
         </div>
       </div>
     </div>
@@ -1647,6 +1671,61 @@ function formatData(value: unknown) {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
   return JSON.stringify(value, null, 2);
+}
+
+function createInitialAssistantMessage(): ChatMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: initialAssistantMessage.role,
+    text: initialAssistantMessage.text,
+    at: Date.now()
+  };
+}
+
+function loadStoredMessages(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [createInitialAssistantMessage()];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [createInitialAssistantMessage()];
+    const messages = parsed
+      .filter((item) => item && (item.role === "assistant" || item.role === "user") && typeof item.text === "string")
+      .map((item) => ({
+        id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
+        role: item.role,
+        text: item.text,
+        at: typeof item.at === "number" ? item.at : Date.now(),
+        attachments: Array.isArray(item.attachments) ? item.attachments : undefined
+      }))
+      .slice(-HISTORY_LIMIT);
+    return messages.length > 0 ? messages : [createInitialAssistantMessage()];
+  } catch {
+    return [createInitialAssistantMessage()];
+  }
+}
+
+function saveStoredMessages(messages: ChatMessage[]) {
+  const serializable = messages
+    .filter((message) => message.text.trim() || message.attachments?.length)
+    .map(({ id, role, text, at, attachments }) => ({
+      id,
+      role,
+      text,
+      at,
+      attachments
+    }))
+    .slice(-HISTORY_LIMIT);
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(serializable));
+}
+
+function buildConversationHistory(messages: ChatMessage[]) {
+  return messages
+    .filter((message) => message.text.trim())
+    .slice(-8)
+    .map((message) => ({
+      role: message.role,
+      text: message.text.slice(0, 1400)
+    }));
 }
 
 function summarizeRecognition(value: unknown) {

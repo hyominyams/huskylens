@@ -109,6 +109,7 @@ app.post("/api/ask", async (req, res) => {
       question,
       visionContext,
       mcpTools,
+      history: Array.isArray(req.body.history) ? req.body.history : [],
       attachments: Array.isArray(req.body.attachments) ? req.body.attachments : []
     });
 

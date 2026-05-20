@@ -30,6 +30,7 @@ type AnswerInput = {
   question: string;
   visionContext: unknown;
   mcpTools?: unknown;
+  history?: Array<{ role?: unknown; text?: unknown }>;
   attachments?: string[];
 };
 
@@ -73,10 +74,13 @@ export async function answerWithOpenAI(input: AnswerInput) {
               `학생 질문: ${input.question}`,
               `사용자 첨부 이미지 수: ${userImages.length}`,
               `HUSKYLENS 첨부 이미지 수: ${visionImages.length}`,
+              "최근 대화:",
+              formatConversationHistory(input.history),
               "HUSKYLENS 2 인식 결과:",
               summarizeVisionContext(input.visionContext),
               "답변 지침:",
               "- 먼저 사용자의 질문에 직접 답한다.",
+              "- 최근 대화가 있으면 맥락을 이어서 답한다.",
               "- 사용자가 직접 업로드한 이미지가 있으면 이를 우선 참고한다.",
               "- detection 결과와 이미지가 모두 비어 있거나 불명확하면 그렇게 말한다.",
               "- 일반 질문은 MCP 도구 규칙에 갇히지 말고 자연스럽게 답한다.",
@@ -92,6 +96,18 @@ export async function answerWithOpenAI(input: AnswerInput) {
   });
 
   return response.output_text;
+}
+
+function formatConversationHistory(history: AnswerInput["history"]) {
+  if (!Array.isArray(history) || history.length === 0) return "최근 대화 없음";
+  return history
+    .filter((message) => message && (message.role === "assistant" || message.role === "user") && typeof message.text === "string")
+    .slice(-8)
+    .map((message, index) => {
+      const role = message.role === "assistant" ? "assistant" : "user";
+      return `${index + 1}. ${role}: ${String(message.text).slice(0, 1400)}`;
+    })
+    .join("\n");
 }
 
 function formatMcpTools(value: unknown) {
