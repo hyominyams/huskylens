@@ -4,16 +4,10 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: [
-          "Pretendard",
-          "'Bricolage Grotesque'",
-          "ui-sans-serif",
-          "system-ui",
-          "sans-serif"
-        ],
-        display: ["'Bricolage Grotesque'", "Pretendard", "sans-serif"],
-        serif: ["'Instrument Serif'", "ui-serif", "Georgia", "serif"],
-        mono: ["'JetBrains Mono'", "ui-monospace", "SFMono-Regular", "monospace"]
+        sans: ["Pretendard", "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ["Pretendard", "ui-sans-serif", "system-ui", "sans-serif"],
+        serif: ["ui-serif", "Georgia", "serif"],
+        mono: ["ui-monospace", "SFMono-Regular", "monospace"]
       },
       colors: {
         ink: "#0c1424",
@@ -64,42 +58,6 @@ export default {
         inset:
           "inset 0 1px 0 rgba(255, 255, 255, 0.7), inset 0 0 0 1px rgba(180, 195, 220, 0.4)",
         sunk: "inset 0 1px 3px rgba(40, 51, 70, 0.10)"
-      },
-      keyframes: {
-        rise: {
-          "0%": { opacity: "0", transform: "translateY(10px)" },
-          "100%": { opacity: "1", transform: "translateY(0)" }
-        },
-        "pulse-ring": {
-          "0%": { boxShadow: "0 0 0 0 rgba(95, 209, 173, 0.55)" },
-          "70%": { boxShadow: "0 0 0 10px rgba(95, 209, 173, 0)" },
-          "100%": { boxShadow: "0 0 0 0 rgba(95, 209, 173, 0)" }
-        },
-        shimmer: {
-          "0%": { backgroundPosition: "200% 0" },
-          "100%": { backgroundPosition: "-200% 0" }
-        },
-        drift: {
-          "0%, 100%": { transform: "translate3d(0,0,0) scale(1)" },
-          "33%": { transform: "translate3d(40px,-20px,0) scale(1.05)" },
-          "66%": { transform: "translate3d(-30px,15px,0) scale(0.96)" }
-        },
-        scan: {
-          "0%": { transform: "translateY(-100%)" },
-          "100%": { transform: "translateY(180%)" }
-        },
-        "blink-dot": {
-          "0%, 70%, 100%": { opacity: "0.25" },
-          "35%": { opacity: "1" }
-        }
-      },
-      animation: {
-        rise: "rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both",
-        "pulse-ring": "pulse-ring 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite",
-        shimmer: "shimmer 2.4s linear infinite",
-        drift: "drift 24s ease-in-out infinite",
-        scan: "scan 3.2s linear infinite",
-        "blink-dot": "blink-dot 1.4s ease-in-out infinite"
       }
     }
   },

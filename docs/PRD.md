@@ -28,11 +28,12 @@ Students should be able to clone the GitHub repository, run the app locally, con
 3. Student runs `npm run start`.
 4. Student opens `http://localhost:5173`.
 5. Student connects to HUSKYLENS 2 using auto discovery or manual MCP URL entry.
-6. Student asks a question in the chat.
-7. The local backend reads the active HUSKYLENS algorithm.
-8. The local backend requests the recognition result from MCP.
-9. The local backend sends the detection data and camera image to OpenAI.
-10. The chat displays the answer.
+6. The main screen starts showing the HUSKYLENS scene.
+7. Student asks a question in the right-side chat.
+8. The local backend reads the active HUSKYLENS algorithm.
+9. The local backend requests the recognition result from MCP.
+10. The local backend sends the detection data and camera image to OpenAI.
+11. The chat displays the answer.
 
 ## Hardware And Network Requirements
 
@@ -49,6 +50,10 @@ The MCP URL must be treated as runtime data. It can change across Wi-Fi networks
 Required behavior:
 
 - Provide an auto discovery button.
+- On first load, try the last successful URL with a short timeout when one exists.
+- Start discovery in parallel when a startup connection attempt is slow.
+- Forget the stored URL after an automatic startup connection failure.
+- Run discovery once on first load when there is no last successful URL or the stored URL is no longer reachable.
 - Allow manual URL entry.
 - Persist the last successful URL locally.
 - Show connection state clearly.
@@ -100,10 +105,13 @@ If the image resource link uses `192.168.88.1`, rewrite it to the current MCP ho
 
 - React + Tailwind CSS
 - Pretendard font
-- Calm, refined visual style
-- Main surface is a real chatbot conversation
+- Calm, refined IDE-like visual style
+- Avoid oversized rounded cards and decorative glass effects; use sharper panels, compact toolbars, and restrained controls.
+- Main surface is the HUSKYLENS screen with a real chatbot conversation beside it on laptop and desktop screens
 - Chat messages render Markdown.
 - Settings are available but secondary
+- The student-facing settings panel should expose only API key handling; model and reasoning defaults belong in server configuration.
+- Advanced controls are kept out of the main student flow unless they directly support screen viewing or asking questions
 - No gradients unless explicitly requested
 - User-facing copy should be concise product language
 
@@ -115,14 +123,20 @@ If the image resource link uses `192.168.88.1`, rewrite it to the current MCP ho
 - The competition app must not provide camera-free mock answers.
 - If no HUSKYLENS MCP connection exists, the user cannot submit a camera-based question.
 - The app must not present generated answers as camera-grounded unless they use a real recognition result from HUSKYLENS.
+- Chat history should not persist across app loads, and changing to a different HUSKYLENS URL should clear stale conversation and scene context.
 
 ## Validation
 
 Before considering a change complete:
 
 ```bash
+npm run check:ui
 npm run build
 ```
+
+`npm run check` runs both commands in order.
+
+The UI check must preserve the primary screen, the right-side chat flow, Markdown rendering, connection checklist copy, address-change stale scene/answer protection, and camera-grounded server answer path while preventing old settings/data/upload surfaces from returning.
 
 For hardware validation:
 
@@ -131,3 +145,5 @@ For hardware validation:
 3. Read the current scene.
 4. Ask a short question.
 5. Confirm the response references the latest recognition result.
+
+Use [hardware-validation.md](hardware-validation.md) for the full classroom checklist.

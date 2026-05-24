@@ -9,7 +9,9 @@
   "scripts": {
     "start": "concurrently -k -n server,web -c cyan,green \"tsx src/server/index.ts\" \"vite --host 0.0.0.0\"",
     "dev": "npm run start",
+    "check": "npm run check:ui && npm run build",
     "build": "tsc --noEmit && vite build",
+    "check:ui": "tsx scripts/check-ui.ts",
     "doctor": "tsx scripts/doctor.ts",
     "package:windows-student": "node scripts/package-windows-student.mjs"
   },

@@ -3,7 +3,6 @@
 @import "@fontsource/pretendard/500.css";
 @import "@fontsource/pretendard/600.css";
 @import "@fontsource/pretendard/700.css";
-@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300;12..96,400;12..96,500;12..96,600;12..96,700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;400;500;600&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -12,7 +11,7 @@
 :root {
   color-scheme: light;
   color: #0c1424;
-  font-family: Pretendard, "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  font-family: Pretendard, ui-sans-serif, system-ui, sans-serif;
   font-feature-settings: "ss01", "cv11";
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -34,20 +33,12 @@ body {
 
 body {
   position: relative;
-  background: #eef3f9;
+  background: #e8edf4;
   background-attachment: fixed;
 }
 
-/* Fine SVG grain overlay across the whole viewport */
 body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.55;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.92' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.08 0'/></filter><rect width='220' height='220' filter='url(%23n)'/></svg>");
+  content: none;
 }
 
 button,
@@ -69,7 +60,6 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
-/* Custom thin scrollbar for chat & data panels */
 .scroll-fade::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -85,68 +75,20 @@ textarea:focus-visible {
   background: rgba(125, 141, 164, 0.45);
 }
 
-/* Grain texture applied to glass surfaces — soft tactile depth */
-.grain {
-  position: relative;
-}
-.grain::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  border-radius: inherit;
-  opacity: 0.45;
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0'/></filter><rect width='200' height='200' filter='url(%23n)'/></svg>");
-}
-
-/* Fine grid backdrop — used on data panels for instrument feel */
-.grid-fine {
-  background-color: rgba(255, 255, 255, 0.18);
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><path d='M0 0H24M0 0V24' fill='none' stroke='rgba(125,141,164,0.10)' stroke-width='1'/></svg>");
-  background-size: 24px 24px;
-  background-position: -1px -1px;
-}
-
-/* Glass panel — frosted surface with hairline edge */
-.panel-glass {
-  background: rgba(255, 255, 255, 0.76);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.85);
+.panel-light {
+  background: #f9fbfe;
+  border: 1px solid rgba(180, 195, 220, 0.92);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.7) inset,
-    0 0 0 1px rgba(180, 195, 220, 0.28),
-    0 24px 48px -16px rgba(70, 100, 140, 0.18);
+    0 10px 20px -18px rgba(40, 51, 70, 0.28);
 }
 
 .panel-deep {
-  background: #0c1726;
-  border: 1px solid rgba(157, 193, 239, 0.16);
+  background: #0b1220;
+  border: 1px solid rgba(78, 99, 132, 0.72);
   box-shadow:
-    inset 0 1px 0 rgba(157, 193, 239, 0.12),
-    0 24px 48px -20px rgba(10, 19, 32, 0.6);
-}
-
-/* Signal bars — three little bars that pulse for active state */
-.signal-bars span {
-  display: inline-block;
-  width: 2px;
-  border-radius: 1px;
-  background: currentColor;
-  animation: blink-dot 1.4s ease-in-out infinite;
-}
-.signal-bars span:nth-child(1) {
-  height: 5px;
-  animation-delay: 0s;
-}
-.signal-bars span:nth-child(2) {
-  height: 9px;
-  animation-delay: 0.15s;
-}
-.signal-bars span:nth-child(3) {
-  height: 13px;
-  animation-delay: 0.3s;
+    inset 0 1px 0 rgba(157, 193, 239, 0.10),
+    0 10px 22px -18px rgba(10, 19, 32, 0.72);
 }
 
 @keyframes blink-dot {
@@ -160,7 +102,6 @@ textarea:focus-visible {
   }
 }
 
-/* Typing dots for the assistant thinking bubble */
 .typing-dots span {
   display: inline-block;
   width: 5px;
@@ -177,43 +118,13 @@ textarea:focus-visible {
   animation-delay: 0.36s;
 }
 
-/* Scan line — used on the vision data panel */
-.scan-line {
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 22%;
-  border-top: 1px solid rgba(157, 193, 239, 0.4);
-  background: rgba(157, 193, 239, 0.12);
-  pointer-events: none;
-  animation: scan 3.4s linear infinite;
-}
-
-@keyframes scan {
-  0% {
-    transform: translateY(-110%);
-  }
-  100% {
-    transform: translateY(420%);
-  }
-}
-
-/* Subtle hover lift used on interactive cards */
 .lift {
   transition:
-    transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.lift:hover {
-  transform: translateY(-1px);
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
 }
 
-/* Hairline divider — true 0.5px feel */
-.hairline {
-  background: rgba(125, 141, 164, 0.28);
-  height: 1px;
-}
-
-/* Reveal animation for staggered entrances */
 .reveal {
   animation: rise 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
 }

@@ -20,6 +20,12 @@ The app also sends the connected device's raw MCP `listTools()` schema to the AI
 
 - Backend scans local IPv4 subnets for `http://<ip>:3000/sse`.
 - A candidate is accepted when it responds as `text/event-stream`.
+- On first load, the web app tries the last successful URL with a short connection timeout when one exists.
+- If that startup connection takes more than a short moment, discovery starts in parallel so a stale saved URL does not hold the class on a long wait.
+- If the stored URL fails during automatic startup, the web app removes it and runs discovery once.
+- If there is no stored URL, the web app runs discovery once.
+- Discovery uses a short overall time budget so classroom networks with many unreachable candidates do not leave the UI waiting indefinitely.
+- Discovery skips common virtual, tunnel, and link-local interfaces so scanning focuses on reachable classroom networks.
 - Works when the student computer and HUSKYLENS are on the same reachable network segment.
 - May fail on networks with client isolation, different subnets, different ports, or blocked local traffic.
 
@@ -27,7 +33,8 @@ The app also sends the connected device's raw MCP `listTools()` schema to the AI
 
 - Uses MCP SSE transport.
 - Lists available tools after connection.
-- Shows connection status and tool count in the UI.
+- Shows connection status in the UI; raw tool details stay in backend context.
+- Connection setup and tool listing use short timeouts so unreachable addresses return a clear error instead of leaving the connect button waiting indefinitely.
 
 ### Read Current Scene
 
@@ -41,12 +48,47 @@ The app also sends the connected device's raw MCP `listTools()` schema to the AI
   - raw MCP payload
 - Rewrites image resource hosts to the current MCP host when the device returns an internal host such as `192.168.88.1`.
 
+### Link Camera Screen
+
+- The main UI shows the HUSKYLENS screen as the primary surface, with chat beside it on wide screens.
+- Screen capture starts automatically after a successful HUSKYLENS connection.
+- Students can pause or resume the screen from the main screen.
+- When enabled, the app polls `/api/huskylens/screen`, which uses `multimedia_control` with `operation: "take_screenshot"`.
+- The screen route does not substitute recognition result images for the main screen, so hardware validation can verify screenshot delivery directly.
+- Background polling uses shorter timeouts than first-frame and manual refresh requests so chat requests are less likely to wait behind a slow screen refresh.
+- If a background screenshot refresh times out after a valid frame is already shown, the UI keeps the last frame visible.
+- A transient background refresh failure does not replace a valid existing frame with an error message; manual refresh and first-frame failures still surface the problem.
+- The browser schedules the next refresh after the previous refresh completes, with a short adaptive delay based on response time, so slow MCP calls do not pile up in the device queue.
+- If the HUSKYLENS address changes manually or through auto discovery while a screen request is still in flight, the browser clears the old scene state and ignores the old response so a previous device frame cannot reappear after the URL changes.
+- If the HUSKYLENS address changes while an AI answer request is still in flight, the browser cancels the pending UI update so an answer grounded in the previous device cannot appear in the new device flow.
+- The live screen badge shows the latest capture response time, and slow captures are visually distinguished without adding another student-facing control.
+- Screen polling pauses while the chat is answering, and late screen responses are ignored so the UI keeps the question's scene stable.
+- Timed-out MCP tool calls reset the client session so an unfinished device call does not leave later screen or chat requests stuck behind a stale session.
+- This is snapshot polling, not a guaranteed continuous video stream.
+- `/api/ask` reuses the latest screen snapshot when available so chat requests do not wait for an extra screenshot.
+- If the latest recognition result or screen is already available, `/api/ask` uses a shorter recognition timeout and reuses that context when recognition is slow.
+- Chat history is kept only for the current browser session. A new app load starts with a fresh conversation, and switching to a different HUSKYLENS URL clears the old conversation and scene context so stale camera answers are not reused.
+
 ### Ask AI About The Scene
 
 - Sends the user question, structured detection data, and the current HUSKYLENS image to OpenAI.
 - Sends the current MCP raw tool schema to OpenAI so the AI can reason about device capabilities.
 - If the HUSKYLENS image cannot be fetched, the AI receives detection data only.
 - If HUSKYLENS is not connected, the app must reject the question instead of making a camera-grounded answer.
+- Chat requests use a bounded HUSKYLENS recognition timeout. If no recent screen is available, students receive a clear retry message instead of waiting on a stalled device call.
+
+### Draw Text On Device Screen
+
+- Backend route `/api/huskylens/draw-text` calls `draw_control` with `operation: "draw_text"`.
+- Backend route `/api/huskylens/clear-text` calls `draw_control` with `operation: "clear_text"`.
+- The main student UI does not expose these controls by default.
+- Text is limited to a short message so it remains readable on the device screen.
+
+### Capture Photo When A Target ID Appears
+
+- Backend route `/api/huskylens/photo` can call `multimedia_control` with `operation: "take_photo"`.
+- The main student UI does not expose automatic ID-triggered photo capture by default.
+- Device-native scheduled tasks still require exact trigger names and should be tested separately before competition use.
 
 ## AI Context Sources
 
@@ -127,7 +169,9 @@ Competition use:
 
 Current app status:
 
-- The MCP tool exists, but chat-triggered execution is not implemented yet.
+- Backend routes exist for drawing and clearing text.
+- The main student UI does not expose these controls by default.
+- Rectangle drawing is documented but not yet exposed in the UI.
 
 ### `learn_control`
 
@@ -235,7 +279,9 @@ Competition use:
 
 Current app status:
 
-- Photo capture helper exists in backend, but the main AI answer path uses the recognition result image.
+- Photo capture is available from the backend.
+- The main student UI does not expose photo controls by default.
+- Screen linking uses `take_screenshot` only. Recognition result images are used for AI scene context, not as the main screen fallback.
 
 ### `multi_algorithm_control`
 
@@ -275,8 +321,8 @@ Competition use:
 
 Current app status:
 
-- Not yet exposed as UI controls.
-- Should be considered advanced because trigger names are exact and device-specific.
+- Not exposed as direct UI controls.
+- Native tasks should be considered advanced because trigger names are exact and device-specific.
 
 ## Recommended Build Order
 

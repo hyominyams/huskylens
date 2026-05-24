@@ -25,13 +25,11 @@ const ASSISTANT_INSTRUCTIONS = [
 
 type AnswerInput = {
   apiKey?: string;
-  model?: string;
-  reasoningEffort?: string;
   question: string;
   visionContext: unknown;
+  screenContext?: unknown;
   mcpTools?: unknown;
   history?: Array<{ role?: unknown; text?: unknown }>;
-  attachments?: string[];
 };
 
 export async function answerWithOpenAI(input: AnswerInput) {
@@ -41,13 +39,9 @@ export async function answerWithOpenAI(input: AnswerInput) {
   }
 
   const client = new OpenAI({ apiKey });
-  const model = input.model || process.env.OPENAI_MODEL || "gpt-5.4-mini";
-  const reasoningEffort = input.reasoningEffort || process.env.OPENAI_REASONING_EFFORT || "low";
-  const visionImages = await getVisionImageInputs(input.visionContext);
-  const userImages = (input.attachments || [])
-    .filter((url) => typeof url === "string" && url.startsWith("data:image/"))
-    .slice(0, 4)
-    .map((url) => ({ type: "input_image", image_url: url }));
+  const model = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+  const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || "low";
+  const visionImages = await getVisionImageInputs(input.visionContext, input.screenContext);
 
   const response = await client.responses.create({
     model,
@@ -72,23 +66,22 @@ export async function answerWithOpenAI(input: AnswerInput) {
             type: "input_text",
             text: [
               `학생 질문: ${input.question}`,
-              `사용자 첨부 이미지 수: ${userImages.length}`,
-              `HUSKYLENS 첨부 이미지 수: ${visionImages.length}`,
+              `HUSKYLENS 이미지 수: ${visionImages.length}`,
               "최근 대화:",
               formatConversationHistory(input.history),
               "HUSKYLENS 2 인식 결과:",
               summarizeVisionContext(input.visionContext),
+              "HUSKYLENS 화면 스냅샷:",
+              summarizeScreenContext(input.screenContext),
               "답변 지침:",
               "- 먼저 사용자의 질문에 직접 답한다.",
               "- 최근 대화가 있으면 맥락을 이어서 답한다.",
-              "- 사용자가 직접 업로드한 이미지가 있으면 이를 우선 참고한다.",
               "- detection 결과와 이미지가 모두 비어 있거나 불명확하면 그렇게 말한다.",
               "- 일반 질문은 MCP 도구 규칙에 갇히지 말고 자연스럽게 답한다.",
               "- MCP 기능이나 장치 조작 질문은 raw tool schema와 참조 문서를 근거로 판단한다.",
               "- 답변은 Markdown으로 작성해도 된다."
             ].join("\n\n")
           },
-          ...userImages,
           ...visionImages
         ] as any
       }
@@ -193,8 +186,18 @@ function normalizeReasoningEffort(value: string) {
   return "low";
 }
 
-async function getVisionImageInputs(visionContext: unknown) {
-  const urls = extractImageUrls(visionContext).slice(0, 1);
+function summarizeScreenContext(value: unknown) {
+  if (!value) return "화면 스냅샷 없음";
+  const urls = extractImageUrls(value);
+  return [
+    `imageResources: ${urls.length}`,
+    "rawContext:",
+    JSON.stringify(value, null, 2).slice(0, 12000)
+  ].join("\n");
+}
+
+async function getVisionImageInputs(...contexts: unknown[]) {
+  const urls = [...new Set(contexts.flatMap((context) => extractImageUrls(context)))].slice(0, 2);
   const images = [];
   for (const url of urls) {
     const dataUrl = await fetchImageAsDataUrl(url);

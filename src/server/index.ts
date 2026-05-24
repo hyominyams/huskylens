@@ -5,16 +5,19 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   connectHuskyLens,
+  clearText,
   disconnectHuskyLens,
   discoverHuskyLens,
+  drawText,
   getApplications,
   getHuskyLensToolSchemas,
   getRecognitionResult,
-  takePhoto
+  takePhoto,
+  takeScreenshot
 } from "./huskylensMcp.js";
 import { answerWithOpenAI } from "./openaiClient.js";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -37,7 +40,7 @@ app.post("/api/huskylens/connect", async (req, res) => {
     const data = await connectHuskyLens(req.body.url);
     res.json({ ok: true, data });
   } catch (error) {
-    res.status(400).json({ ok: false, error: getErrorMessage(error) });
+    res.json({ ok: false, error: getErrorMessage(error) });
   }
 });
 
@@ -61,7 +64,15 @@ app.get("/api/huskylens/discover", async (_req, res) => {
 
 app.post("/api/huskylens/recognition", async (req, res) => {
   try {
-    const data = await getRecognitionResult(req.body.url);
+    const data = await getRecognitionResult(
+      req.body.url,
+      req.body.fast
+        ? {
+            timeoutMs: 2500,
+            timeoutMessage: "장면 수신이 지연되고 있습니다. 화면을 잠시 후 다시 확인하세요."
+          }
+        : {}
+    );
     res.json({ ok: true, data });
   } catch (error) {
     res.status(400).json({ ok: false, error: getErrorMessage(error) });
@@ -86,6 +97,67 @@ app.post("/api/huskylens/photo", async (req, res) => {
   }
 });
 
+app.post("/api/huskylens/screenshot", async (req, res) => {
+  try {
+    const data = await takeScreenshot(req.body.url);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: getErrorMessage(error) });
+  }
+});
+
+app.post("/api/huskylens/screen", async (req, res) => {
+  const startedAt = Date.now();
+  const background = req.body.background === true;
+
+  try {
+    if (!req.body.url) {
+      throw new Error("HUSKYLENS MCP URL이 필요합니다.");
+    }
+
+    const data = await takeScreenshot(req.body.url, {
+      timeoutMs: background ? 900 : 2200,
+      timeoutMessage: background
+        ? "화면 갱신이 지연되고 있습니다."
+        : "화면 수신이 지연되고 있습니다. Wi-Fi 상태를 확인하거나 잠시 후 다시 시도하세요."
+    });
+    res.json({
+      ok: true,
+      data: {
+        ...asRecord(data),
+        captureMode: "screenshot",
+        durationMs: Date.now() - startedAt
+      }
+    });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: getErrorMessage(error) });
+  }
+});
+
+app.post("/api/huskylens/draw-text", async (req, res) => {
+  try {
+    const data = await drawText(req.body.url, {
+      text: req.body.text,
+      color: req.body.color,
+      x: req.body.x,
+      y: req.body.y,
+      fontSize: req.body.fontSize
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: getErrorMessage(error) });
+  }
+});
+
+app.post("/api/huskylens/clear-text", async (req, res) => {
+  try {
+    const data = await clearText(req.body.url);
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: getErrorMessage(error) });
+  }
+});
+
 app.post("/api/ask", async (req, res) => {
   try {
     const question = req.body.question || "";
@@ -99,21 +171,36 @@ app.post("/api/ask", async (req, res) => {
       return;
     }
 
-    const visionContext = await getRecognitionResult(req.body.huskylensUrl);
+    const providedVisionContext = req.body.visionContext || null;
+    const providedScreenContext = req.body.screenContext || null;
+    const fallbackVisionContext = providedVisionContext || providedScreenContext;
+    const hasFallbackVisionContext = Boolean(fallbackVisionContext);
+    let visionContext: unknown;
+    try {
+      visionContext = await getRecognitionResult(req.body.huskylensUrl, {
+        timeoutMs: hasFallbackVisionContext ? 1800 : 4500,
+        timeoutMessage: "HUSKYLENS 장면 수신이 지연되고 있습니다. 카메라 화면을 확인한 뒤 다시 질문하세요."
+      });
+    } catch (error) {
+      if (!hasFallbackVisionContext) throw error;
+      visionContext = fallbackVisionContext;
+    }
+
+    const screenContext = providedScreenContext || (req.body.includeScreen
+      ? await takeScreenshot(req.body.huskylensUrl).catch(() => null)
+      : null);
     const mcpTools = await getHuskyLensToolSchemas(req.body.huskylensUrl);
 
     const answer = await answerWithOpenAI({
       apiKey: req.body.openaiApiKey,
-      model: req.body.model,
-      reasoningEffort: req.body.reasoningEffort,
       question,
       visionContext,
+      screenContext,
       mcpTools,
-      history: Array.isArray(req.body.history) ? req.body.history : [],
-      attachments: Array.isArray(req.body.attachments) ? req.body.attachments : []
+      history: Array.isArray(req.body.history) ? req.body.history : []
     });
 
-    res.json({ ok: true, data: { answer, visionContext } });
+    res.json({ ok: true, data: { answer, visionContext, screenContext } });
   } catch (error) {
     res.status(400).json({ ok: false, error: getErrorMessage(error) });
   }
@@ -136,4 +223,10 @@ app.listen(port, () => {
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : { raw: value };
 }

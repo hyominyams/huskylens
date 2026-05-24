@@ -3,26 +3,24 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   Aperture,
-  Bot,
   Check,
-  ChevronRight,
   CircleAlert,
-  Cpu,
   Eye,
-  Hash,
-  ImagePlus,
-  KeyRound,
   Loader2,
+  Monitor,
+  Pause,
+  Play,
   Radar,
+  RefreshCcw,
   Send,
   Settings2,
-  Terminal,
   Trash2,
   UserRound,
   Wifi,
   WifiOff,
   X,
-  Zap
+  Zap,
+  Power
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -51,37 +49,37 @@ type ChatMessage = {
   text: string;
   context?: unknown;
   at: number;
-  attachments?: string[];
   displayLen?: number;
 };
 
-const MAX_ATTACHMENTS = 4;
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
-const HISTORY_STORAGE_KEY = "huskylens:chatHistory";
-const HISTORY_LIMIT = 10;
+type ScreenPayload = {
+  resources?: Array<Record<string, unknown>>;
+  detections?: Array<Record<string, unknown>>;
+  captureMode?: "screenshot";
+  durationMs?: number;
+  raw?: unknown;
+  values?: unknown[];
+};
+
 const initialAssistantMessage = {
   role: "assistant" as const,
   text: "허스키렌즈를 연결하고 카메라가 보는 장면에 대해 자유롭게 질문해 주세요. 인식 데이터를 함께 읽고 답변해 드립니다."
 };
 
-const defaultMcpUrl =
-  localStorage.getItem("huskylens:mcpUrl") || "http://192.168.0.100:3000/sse";
-const defaultModel = localStorage.getItem("huskylens:model") || "gpt-5.4-mini";
-const defaultReasoning = localStorage.getItem("huskylens:reasoning") || "low";
+const defaultMcpUrl = localStorage.getItem("huskylens:mcpUrl") || "";
 
 function App() {
   const [mcpUrl, setMcpUrl] = useState(defaultMcpUrl);
-  const [model, setModel] = useState(defaultModel);
-  const [reasoningEffort, setReasoningEffort] = useState(defaultReasoning);
   const [openaiApiKey, setOpenaiApiKey] = useState(
     localStorage.getItem("huskylens:openaiApiKey") || ""
   );
   const [question, setQuestion] = useState("");
-  const [attachments, setAttachments] = useState<string[]>([]);
   const [streamingId, setStreamingId] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
+  const [screenPolling, setScreenPolling] = useState(false);
+  const [screenFrameTick, setScreenFrameTick] = useState(0);
   const [latestVisionContext, setLatestVisionContext] = useState<unknown>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadStoredMessages());
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [createInitialAssistantMessage()]);
   const [health, setHealth] = useState<ApiState<Record<string, unknown>>>({
     loading: true,
     error: "",
@@ -102,33 +100,33 @@ function App() {
     error: "",
     data: null
   });
+  const [screenCapture, setScreenCapture] = useState<ApiState<ScreenPayload>>({
+    loading: false,
+    error: "",
+    data: null
+  });
   const [answer, setAnswer] = useState<
-    ApiState<{ answer: string; visionContext: unknown }>
+    ApiState<{ answer: string; visionContext: unknown; screenContext?: unknown }>
   >({ loading: false, error: "", data: null });
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const activeScreenRequestRef = useRef<number | null>(null);
+  const screenRequestSeqRef = useRef(0);
+  const screenDelayRef = useRef(800);
+  const screenFailureCountRef = useRef(0);
+  const connectRequestRef = useRef(0);
+  const discoveryRequestRef = useRef(0);
+  const askRequestSeqRef = useRef(0);
+  const initialDiscoveryRef = useRef(false);
 
   useEffect(() => {
     void loadHealth();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("huskylens:mcpUrl", mcpUrl);
-  }, [mcpUrl]);
-  useEffect(() => {
-    localStorage.setItem("huskylens:model", model);
-  }, [model]);
-  useEffect(() => {
-    localStorage.setItem("huskylens:reasoning", reasoningEffort);
-  }, [reasoningEffort]);
-  useEffect(() => {
     if (openaiApiKey) localStorage.setItem("huskylens:openaiApiKey", openaiApiKey);
     else localStorage.removeItem("huskylens:openaiApiKey");
   }, [openaiApiKey]);
-  useEffect(() => {
-    saveStoredMessages(messages);
-  }, [messages]);
-
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -139,11 +137,13 @@ function App() {
   const hasServerApiKey = health.data?.apiKeySource === "server" || Boolean(health.data?.hasServerApiKey);
   const needsApiKey =
     !health.loading && !hasServerApiKey && openaiApiKey.trim().length === 0;
+  const urlMatchesConnection = connection.data?.url === mcpUrl.trim();
+  const connectedToCurrentUrl = Boolean(connection.data && urlMatchesConnection);
   const canAsk = useMemo(() => {
     const hasKey = hasServerApiKey || openaiApiKey.trim().length > 0;
-    const hasInput = question.trim().length > 0 || attachments.length > 0;
-    return hasInput && hasKey && Boolean(connection.data);
-  }, [attachments.length, connection.data, hasServerApiKey, openaiApiKey, question]);
+    const hasInput = question.trim().length > 0;
+    return hasInput && hasKey && connectedToCurrentUrl;
+  }, [connectedToCurrentUrl, hasServerApiKey, openaiApiKey, question]);
 
   useEffect(() => {
     if (!streamingId) return;
@@ -174,11 +174,73 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [messages, streamingId]);
 
+  useEffect(() => {
+    if (needsApiKey) setShowSettings(true);
+  }, [needsApiKey]);
+
+  useEffect(() => {
+    if (initialDiscoveryRef.current) return;
+    initialDiscoveryRef.current = true;
+    const storedUrl = defaultMcpUrl.trim();
+    if (!storedUrl) {
+      void discover();
+      return;
+    }
+
+    const normalizedStoredUrl = normalizeHuskyLensUrl(storedUrl);
+    void (async () => {
+      let fallbackStarted = false;
+      const fallbackTimer = window.setTimeout(() => {
+        fallbackStarted = true;
+        void discover();
+      }, 2200);
+      const connected = await connect(storedUrl);
+      window.clearTimeout(fallbackTimer);
+      if (connected === false) {
+        localStorage.removeItem("huskylens:mcpUrl");
+        setMcpUrl((current) =>
+          normalizeHuskyLensUrl(current) === normalizedStoredUrl ? "" : current
+        );
+        setConnection({ loading: false, error: "", data: null });
+        if (!fallbackStarted) {
+          await discover();
+        }
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const url = connectedToCurrentUrl ? connection.data?.url : "";
+    if (!url || !screenPolling || answer.loading) return;
+    let stopped = false;
+    let timer: number | undefined;
+
+    const tick = async () => {
+      if (stopped) return;
+      await refreshScreen(url, true);
+      if (!stopped) {
+        timer = window.setTimeout(tick, screenDelayRef.current);
+      }
+    };
+
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [answer.loading, connectedToCurrentUrl, connection.data?.url, screenPolling]);
+
+  const liveContext = connectedToCurrentUrl
+    ? screenCapture.data ?? latestVisionContext ?? recognition.data
+    : null;
   const sceneState: "live" | "ready" | "idle" = connection.data
-    ? latestVisionContext
-      ? "ready"
-      : "live"
+    ? connectedToCurrentUrl
+      ? liveContext
+        ? "ready"
+        : "live"
+      : "idle"
     : "idle";
+  const canClearConversation = messages.some((message) => message.role === "user");
 
   async function loadHealth() {
     setHealth({ loading: true, error: "", data: null });
@@ -186,64 +248,207 @@ function App() {
     setHealth({ loading: false, error: result.error, data: result.data });
   }
 
-  async function connect() {
+  async function connect(url = mcpUrl) {
+    const nextUrl = normalizeHuskyLensUrl(url);
+    if (!nextUrl) return false;
+    discoveryRequestRef.current += 1;
+    const previousUrl = connection.data?.url;
+    const switchingDevice = Boolean(previousUrl && previousUrl !== nextUrl);
+    if (switchingDevice) {
+      resetConversationState();
+      clearSceneForAddressChange();
+    }
+    if (nextUrl !== mcpUrl) setMcpUrl(nextUrl);
+    const requestId = connectRequestRef.current + 1;
+    connectRequestRef.current = requestId;
     setConnection({ loading: true, error: "", data: null });
     const result = await apiPost<ConnectionData>("/api/huskylens/connect", {
-      url: mcpUrl
+      url: nextUrl
     });
+    if (connectRequestRef.current !== requestId) return;
     setConnection({ loading: false, error: result.error, data: result.data });
+    if (result.data) {
+      if (previousUrl && previousUrl !== result.data.url) {
+        resetConversationState();
+      }
+      localStorage.setItem("huskylens:mcpUrl", result.data.url);
+      screenFailureCountRef.current = 0;
+      setScreenPolling(true);
+      void refreshScreen(result.data.url, false, true);
+      return true;
+    }
+    return false;
+  }
+
+  function changeMcpUrl(value: string) {
+    setMcpUrl(value);
+    connectRequestRef.current += 1;
+    discoveryRequestRef.current += 1;
+    const normalized = normalizeHuskyLensUrl(value);
+    setConnection((current) => ({
+      ...current,
+      loading: false,
+      error: ""
+    }));
+    setDiscovery((current) => ({
+      ...current,
+      loading: false,
+      error: "",
+      data: null
+    }));
+    if (connection.data?.url !== normalized) {
+      if (connection.data) {
+        resetConversationState();
+        clearSceneForAddressChange();
+      } else {
+        clearSceneForAddressChange();
+      }
+      setScreenPolling(false);
+    } else {
+      clearSceneForAddressChange();
+    }
+  }
+
+  function clearSceneForAddressChange() {
+    setRecognition({ loading: false, error: "", data: null });
+    setScreenCapture({ loading: false, error: "", data: null });
+    setLatestVisionContext(null);
+    setAnswer({ loading: false, error: "", data: null });
+    setStreamingId(null);
+    screenRequestSeqRef.current += 1;
+    activeScreenRequestRef.current = null;
+    screenFailureCountRef.current = 0;
+    askRequestSeqRef.current += 1;
+  }
+
+  function holdScreenForAnswer() {
+    screenRequestSeqRef.current += 1;
+    activeScreenRequestRef.current = null;
+    setScreenCapture((current) => ({
+      ...current,
+      loading: false,
+      error: ""
+    }));
+  }
+
+  function normalizeMcpUrlInput() {
+    const normalized = normalizeHuskyLensUrl(mcpUrl);
+    if (normalized && normalized !== mcpUrl) changeMcpUrl(normalized);
   }
 
   async function discover() {
+    const requestId = discoveryRequestRef.current + 1;
+    discoveryRequestRef.current = requestId;
     setDiscovery({ loading: true, error: "", data: null });
     const result = await apiGet<string[]>("/api/huskylens/discover");
-    if (result.data?.[0]) setMcpUrl(result.data[0]);
+    if (discoveryRequestRef.current !== requestId) return;
     setDiscovery({ loading: false, error: result.error, data: result.data });
+    if (result.data?.length === 1) {
+      await connect(result.data[0]);
+      return;
+    }
+    if (result.data?.[0]) setMcpUrl(result.data[0]);
   }
 
-  async function readRecognition() {
-    setRecognition({ loading: true, error: "", data: null });
-    const result = await apiPost("/api/huskylens/recognition", {
-      url: connection.data?.url ?? mcpUrl,
-      question: "What do you see?"
+  async function refreshScreen(
+    url = connectedToCurrentUrl ? connection.data?.url : mcpUrl,
+    quiet = false,
+    retryScreenshot = false
+  ) {
+    if (!url || activeScreenRequestRef.current !== null) return;
+    const requestId = screenRequestSeqRef.current + 1;
+    screenRequestSeqRef.current = requestId;
+    activeScreenRequestRef.current = requestId;
+    if (!quiet) setScreenCapture((current) => ({ ...current, loading: true, error: "" }));
+
+    const result = await apiPost<ScreenPayload>("/api/huskylens/screen", {
+      url,
+      background: quiet
     });
-    setRecognition({ loading: false, error: result.error, data: result.data });
-    if (result.data) setLatestVisionContext(result.data);
+
+    if (activeScreenRequestRef.current !== requestId) return;
+
+    if (result.data) {
+      screenFailureCountRef.current = 0;
+      tuneScreenDelay(result.data.durationMs, true);
+      setScreenCapture({
+        loading: false,
+        error: "",
+        data: result.data
+      });
+      setScreenFrameTick(Date.now());
+      activeScreenRequestRef.current = null;
+      return;
+    }
+
+    screenFailureCountRef.current += 1;
+    setScreenCapture((current) => ({
+      loading: false,
+      error: quiet && current.data ? "" : result.error || "화면을 가져오지 못했습니다.",
+      data: current.data
+    }));
+    tuneScreenDelay(null, false);
+    activeScreenRequestRef.current = null;
+  }
+
+  function tuneScreenDelay(durationMs: unknown, success: boolean) {
+    if (!success) {
+      screenDelayRef.current = Math.max(1000, Math.min(1400, screenDelayRef.current + 200));
+      return;
+    }
+    const duration = typeof durationMs === "number" && Number.isFinite(durationMs) ? durationMs : 900;
+    if (duration < 650) {
+      screenDelayRef.current = 650;
+    } else if (duration < 1300) {
+      screenDelayRef.current = 800;
+    } else if (duration < 2200) {
+      screenDelayRef.current = 1000;
+    } else {
+      screenDelayRef.current = 1200;
+    }
   }
 
   async function ask() {
     const trimmed = question.trim();
-    if (!trimmed && attachments.length === 0) return;
+    if (!trimmed) return;
+    const huskylensUrl = connectedToCurrentUrl ? connection.data?.url : "";
+    if (!huskylensUrl) return;
+    const requestId = askRequestSeqRef.current + 1;
+    askRequestSeqRef.current = requestId;
+    holdScreenForAnswer();
 
-    const sentAttachments = [...attachments];
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
       text: trimmed,
-      at: Date.now(),
-      attachments: sentAttachments.length > 0 ? sentAttachments : undefined
+      at: Date.now()
     };
     setMessages((current) => [...current, userMessage]);
     setQuestion("");
-    setAttachments([]);
     setAnswer({ loading: true, error: "", data: null });
 
-    const result = await apiPost<{ answer: string; visionContext: unknown }>(
+    const result = await apiPost<{ answer: string; visionContext: unknown; screenContext?: unknown }>(
       "/api/ask",
       {
-        huskylensUrl: connection.data?.url ?? mcpUrl,
+        huskylensUrl,
         openaiApiKey,
-        model,
-        reasoningEffort,
-        question: trimmed || "(첨부 이미지 참고)",
-        history: buildConversationHistory(messages),
-        attachments: sentAttachments
+        includeScreen: !screenCapture.data,
+        visionContext: latestVisionContext ?? recognition.data,
+        screenContext: screenCapture.data,
+        question: trimmed,
+        history: buildConversationHistory(messages)
       }
     );
+
+    if (askRequestSeqRef.current !== requestId) return;
 
     if (result.data) {
       const assistantId = crypto.randomUUID();
       setLatestVisionContext(result.data.visionContext);
+      if (result.data.screenContext) {
+        setScreenCapture({ loading: false, error: "", data: result.data.screenContext as ScreenPayload });
+        setScreenFrameTick(Date.now());
+      }
       setAnswer({ loading: false, error: "", data: result.data });
       setMessages((current) => [
         ...current,
@@ -272,26 +477,6 @@ function App() {
     ]);
   }
 
-  async function addFilesAsAttachments(files: FileList | File[]) {
-    const incoming = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    if (incoming.length === 0) return;
-    const remaining = MAX_ATTACHMENTS - attachments.length;
-    if (remaining <= 0) return;
-    const accepted: string[] = [];
-    for (const file of incoming.slice(0, remaining)) {
-      if (file.size > MAX_FILE_BYTES) continue;
-      const dataUrl = await fileToDataUrl(file);
-      if (dataUrl) accepted.push(dataUrl);
-    }
-    if (accepted.length > 0) {
-      setAttachments((curr) => [...curr, ...accepted].slice(0, MAX_ATTACHMENTS));
-    }
-  }
-
-  function removeAttachment(index: number) {
-    setAttachments((curr) => curr.filter((_, i) => i !== index));
-  }
-
   function onComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -300,6 +485,11 @@ function App() {
   }
 
   function clearConversation() {
+    resetConversationState();
+  }
+
+  function resetConversationState() {
+    askRequestSeqRef.current += 1;
     const next = [createInitialAssistantMessage()];
     setMessages(next);
     setLatestVisionContext(null);
@@ -310,28 +500,53 @@ function App() {
 
   return (
     <main className="relative z-10 min-h-screen">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1480px] flex-col px-4 py-5 sm:px-7 lg:px-10 lg:py-7">
+      <div className="mx-auto flex min-h-screen w-full max-w-[1540px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
         <AppHeader
-          connection={connection}
-          model={model}
+          connectedToCurrentUrl={connectedToCurrentUrl}
           showSettings={showSettings}
           onToggleSettings={() => setShowSettings((v) => !v)}
         />
 
-        {needsApiKey ? (
-          <ApiKeyStartScreen
-            onSave={(value) => setOpenaiApiKey(value)}
-            healthError={health.error}
-          />
-        ) : (
-        <div className="mt-6 grid min-h-0 flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_400px]">
-          {/* CHAT PANEL */}
-          <section className="reveal flex min-h-[640px] flex-col overflow-hidden rounded-[28px] panel-glass grain lg:h-[calc(100vh-128px)]">
+        <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_390px] xl:grid-cols-[minmax(0,1fr)_430px]">
+          <section className="reveal relative min-h-[520px] overflow-hidden rounded-[8px] panel-deep lg:h-[calc(100vh-102px)]">
+            <VisionStage
+              context={liveContext}
+              frameTick={screenFrameTick}
+              connection={connection}
+              connectedToCurrentUrl={connectedToCurrentUrl}
+              discovery={discovery}
+              recognition={recognition}
+              screenCapture={screenCapture}
+              answerLoading={answer.loading}
+              mcpUrl={mcpUrl}
+              screenPolling={screenPolling}
+              onChangeUrl={changeMcpUrl}
+              onNormalizeUrl={normalizeMcpUrlInput}
+              onDiscover={discover}
+              onConnect={() => void connect()}
+              onConnectUrl={(url) => void connect(url)}
+              onRefresh={() => void refreshScreen(undefined, false, true)}
+              onTogglePolling={() => {
+                if (!connectedToCurrentUrl || !connection.data) return;
+                const next = !screenPolling;
+                setScreenPolling(next);
+                if (next) void refreshScreen(connection.data.url);
+              }}
+            />
+            {showSettings && (
+              <CompactSettings
+                hasServerApiKey={hasServerApiKey}
+                openaiApiKey={openaiApiKey}
+                onChangeApiKey={setOpenaiApiKey}
+              />
+            )}
+          </section>
+
+          <section className="reveal flex min-h-[620px] flex-col overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
             <SceneStrip
               state={sceneState}
               connectedAt={connection.data?.connectedAt}
-              mcpUrl={connection.data?.url}
-              model={model}
+              canClearConversation={canClearConversation}
               onClearConversation={clearConversation}
             />
 
@@ -349,7 +564,7 @@ function App() {
               {answer.loading && <ThinkingBubble />}
             </div>
 
-            <div className="border-t border-white/70 bg-white/70 px-4 pb-4 pt-4 sm:px-6 sm:pb-5 sm:pt-5">
+            <div className="border-t border-silver-200 bg-[#f6f8fb] px-4 pb-4 pt-4 sm:px-6 sm:pb-5 sm:pt-5">
               {answer.error && <ErrorBanner message={answer.error} />}
               <Composer
                 ref={composerRef}
@@ -360,284 +575,452 @@ function App() {
                 disabled={!canAsk || answer.loading}
                 loading={answer.loading}
                 sceneState={sceneState}
-                attachments={attachments}
-                onAddFiles={addFilesAsAttachments}
-                onRemoveAttachment={removeAttachment}
+                needsApiKey={needsApiKey}
               />
             </div>
           </section>
-
-          {/* SIDEBAR */}
-          <aside
-            className={`${
-              showSettings ? "flex" : "hidden lg:flex"
-            } reveal min-h-0 flex-col gap-4 overflow-y-auto pb-2 lg:h-[calc(100vh-128px)] scroll-fade`}
-            style={{ animationDelay: "80ms" }}
-          >
-            <ConnectionPanel
-              mcpUrl={mcpUrl}
-              onChangeUrl={setMcpUrl}
-              onDiscover={discover}
-              onConnect={connect}
-              onReadScene={readRecognition}
-              connection={connection}
-              discovery={discovery}
-              recognition={recognition}
-            />
-            <ModelPanel
-              hasServerApiKey={hasServerApiKey}
-              openaiApiKey={openaiApiKey}
-              onChangeApiKey={setOpenaiApiKey}
-              model={model}
-              onChangeModel={setModel}
-              reasoningEffort={reasoningEffort}
-              onChangeReasoning={setReasoningEffort}
-            />
-            <VisionDataPanel
-              context={latestVisionContext ?? recognition.data}
-              live={Boolean(connection.data)}
-            />
-          </aside>
         </div>
-        )}
       </div>
     </main>
   );
 }
 
-function ApiKeyStartScreen({
-  onSave,
-  healthError
+function VisionStage({
+  context,
+  frameTick,
+  connection,
+  connectedToCurrentUrl,
+  discovery,
+  recognition,
+  screenCapture,
+  answerLoading,
+  mcpUrl,
+  screenPolling,
+  onChangeUrl,
+  onNormalizeUrl,
+  onDiscover,
+  onConnect,
+  onConnectUrl,
+  onRefresh,
+  onTogglePolling
 }: {
-  onSave: (value: string) => void;
-  healthError: string;
+  context: unknown;
+  frameTick: number;
+  connection: ApiState<ConnectionData>;
+  connectedToCurrentUrl: boolean;
+  discovery: ApiState<string[]>;
+  recognition: ApiState;
+  screenCapture: ApiState<ScreenPayload>;
+  answerLoading: boolean;
+  mcpUrl: string;
+  screenPolling: boolean;
+  onChangeUrl: (value: string) => void;
+  onNormalizeUrl: () => void;
+  onDiscover: () => void;
+  onConnect: () => void;
+  onConnectUrl: (url: string) => void;
+  onRefresh: () => void;
+  onTogglePolling: () => void;
 }) {
-  const [draft, setDraft] = useState("");
-  const [showKey, setShowKey] = useState(false);
-  const trimmed = draft.trim();
+  const connected = connectedToCurrentUrl;
+  const [editingAddress, setEditingAddress] = useState(false);
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const addressInputRef = useRef<HTMLInputElement>(null);
+  const imageUrl = getImageUrlWithCacheBust(getFirstImageUrl(context), frameTick);
+  const details = getRecognitionDetails(context);
+  const screenStatus = answerLoading && screenPolling
+    ? { label: "답변 중 · 화면 유지", latency: "", slow: false }
+    : getScreenStatus(screenCapture);
+  const refreshLabel = "화면 새로고침";
+  const error = connection.error || discovery.error || recognition.error || screenCapture.error;
+  const foundCount = discovery.data?.length ?? 0;
+  const selectedFoundUrl = Boolean(discovery.data?.includes(mcpUrl));
+  const helperText = connected
+    ? hostFromUrl(connection.data!.url)
+    : discovery.loading
+      ? "같은 Wi-Fi에서 허스키렌즈를 찾고 있습니다"
+      : foundCount > 0
+        ? `${foundCount}개 발견${selectedFoundUrl ? " · 선택됨" : ""} · 장치를 누르면 연결됩니다`
+        : discovery.data
+          ? "장치가 보이지 않으면 IP를 직접 입력하세요"
+          : mcpUrl.trim()
+            ? "주소를 확인한 뒤 연결을 누르세요"
+            : "IP만 입력해도 주소가 자동으로 맞춰집니다";
+  const showAddressEditor = !connected || editingAddress;
 
-  function submit(event: React.FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    setEditingAddress(false);
+  }, [connected]);
+
+  useEffect(() => {
+    setImageLoadFailed(false);
+  }, [imageUrl]);
+
+  useEffect(() => {
+    if (!editingAddress || !showAddressEditor || connection.loading) return;
+    const timer = window.setTimeout(() => {
+      addressInputRef.current?.focus();
+      addressInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [connection.loading, editingAddress, showAddressEditor]);
+
+  function onAddressKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter") return;
     event.preventDefault();
-    if (trimmed) onSave(trimmed);
+    if (!mcpUrl.trim() || connection.loading) return;
+    onConnect();
   }
 
   return (
-    <section className="reveal mt-8 flex flex-1 items-center justify-center pb-8">
-      <form
-        onSubmit={submit}
-        className="panel-glass grain w-full max-w-[560px] rounded-[28px] p-6 shadow-elevated sm:p-8"
-      >
-        <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-[16px] bg-ink text-azure-200 shadow-soft">
-            <KeyRound size={21} strokeWidth={1.6} />
-          </div>
-          <div>
-            <p className="text-[12px] font-semibold text-silver-500">
-              처음 시작
-            </p>
-            <h2 className="text-[24px] font-semibold tracking-[-0.02em] text-ink">
-              OpenAI API Key 입력
-            </h2>
-          </div>
-        </div>
-
-        <p className="mb-5 text-[15px] leading-[1.7] text-silver-700">
-          대회용 키를 입력하면 이 브라우저에 저장됩니다. 허스키렌즈 연결 후 바로 질문할 수 있습니다.
-        </p>
-
-        <label className="block">
-          <span className="mb-1.5 inline-block text-[12px] font-semibold text-silver-700">
-            API Key
-          </span>
-          <div className="flex gap-2">
-            <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              type={showKey ? "text" : "password"}
-              placeholder="sk-..."
-              autoFocus
-              spellCheck={false}
-              className="h-12 min-w-0 flex-1 rounded-[14px] border border-silver-200 bg-white px-4 font-mono text-[13px] text-ink shadow-sunk outline-none transition focus:border-azure-300"
+    <div className="flex h-full min-h-[520px] flex-col">
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-[#07111f]">
+        <div className="relative flex h-full w-full items-center justify-center">
+          {imageUrl && !imageLoadFailed ? (
+            <img
+              src={imageUrl}
+              alt="허스키렌즈 카메라 화면"
+              onError={() => setImageLoadFailed(true)}
+              className="h-full w-full object-contain"
             />
-            <button
-              type="button"
-              onClick={() => setShowKey((value) => !value)}
-              className="h-12 rounded-[14px] border border-silver-200 bg-white px-4 text-[13px] font-semibold text-silver-700 shadow-crisp transition hover:bg-frost"
+          ) : (
+            <div className="flex max-w-[520px] flex-col items-center justify-center px-6 text-center text-azure-100/80">
+              <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-[8px] border border-azure-200/15 bg-white/8 text-azure-100 shadow-soft">
+                <Monitor size={30} strokeWidth={1.45} />
+              </div>
+              <h2 className="text-[26px] font-semibold tracking-[-0.018em] text-white">
+                허스키렌즈 화면
+              </h2>
+              <p className="mt-2 text-[14px] leading-[1.7] text-azure-100/65">
+                {imageLoadFailed
+                  ? "화면 이미지를 다시 불러오고 있습니다. 새로고침을 한 번 눌러 주세요."
+                  : "같은 Wi-Fi에서 허스키렌즈 주소로 연결하면 카메라 화면이 크게 표시됩니다."}
+              </p>
+              {!imageLoadFailed && <ConnectionChecklist />}
+            </div>
+          )}
+
+          <div className="absolute left-4 top-4 flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex h-8 items-center gap-2 rounded-[6px] border px-2.5 text-[12px] font-semibold ${
+                connected
+                  ? "border-signal/40 bg-signal/12 text-signal"
+                  : "border-white/12 bg-white/8 text-azure-100/75"
+              }`}
             >
-              {showKey ? "숨김" : "보기"}
-            </button>
+              {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
+              {connected ? "연결됨" : "연결 전"}
+            </span>
+            {screenPolling && (
+              <span
+                className={`inline-flex h-8 items-center gap-2 rounded-[6px] border px-2.5 text-[12px] font-semibold ${
+                  screenStatus.slow
+                    ? "border-warn/45 bg-ink/82 text-warn"
+                    : "border-signal/35 bg-ink/82 text-signal"
+                }`}
+              >
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                {screenStatus.label}
+              </span>
+            )}
           </div>
-        </label>
 
-        {healthError && (
-          <div className="mt-3 flex items-start gap-2 rounded-[12px] border border-alert/30 bg-alert/8 px-3 py-2.5 text-[12.5px] font-medium text-alert-deep">
-            <CircleAlert className="mt-0.5 shrink-0" size={14} />
-            <span className="leading-snug">{healthError}</span>
-          </div>
-        )}
+          {connected && (
+            <div className="absolute right-4 top-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onRefresh}
+                disabled={screenCapture.loading}
+                aria-label={refreshLabel}
+                title={refreshLabel}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[6px] border border-white/12 bg-white/10 text-white transition hover:bg-white/16 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {screenCapture.loading ? <Loader2 className="animate-spin" size={15} /> : <RefreshCcw size={15} />}
+              </button>
+              <button
+                type="button"
+                onClick={onTogglePolling}
+                className="inline-flex h-9 items-center gap-2 rounded-[6px] border border-white/12 bg-white px-3.5 text-[13px] font-semibold text-ink shadow-soft transition hover:bg-azure-50"
+              >
+                {screenPolling ? <Pause size={14} /> : <Play size={14} />}
+                {screenPolling ? "일시정지" : "화면 보기"}
+              </button>
+            </div>
+          )}
 
-        <button
-          type="submit"
-          disabled={!trimmed}
-          className="mt-5 inline-flex h-12 w-full items-center justify-center gap-2 rounded-[14px] bg-ink px-5 text-[14px] font-semibold text-white shadow-elevated transition hover:bg-char active:translate-y-px disabled:cursor-not-allowed disabled:bg-silver-300 disabled:text-silver-500"
-        >
-          시작하기
-          <ChevronRight size={16} />
-        </button>
-
-        <p className="mt-4 text-center text-[12px] leading-[1.6] text-silver-500">
-          대회가 끝나면 브라우저 저장 데이터를 지우면 됩니다.
-        </p>
-      </form>
-    </section>
-  );
-}
-
-/* ════════════════════════════════════════════════════════════ */
-/*  HEADER                                                       */
-/* ════════════════════════════════════════════════════════════ */
-
-function AppHeader({
-  connection,
-  model,
-  showSettings,
-  onToggleSettings
-}: {
-  connection: ApiState<ConnectionData>;
-  model: string;
-  showSettings: boolean;
-  onToggleSettings: () => void;
-}) {
-  const connected = Boolean(connection.data);
-  return (
-    <header className="flex items-center justify-between gap-3">
-      <div className="flex items-center gap-3.5">
-        <div className="relative">
-          <div className="flex h-12 w-12 items-center justify-center rounded-[16px] bg-ink text-azure-200 shadow-elevated">
-            <Aperture size={22} strokeWidth={1.4} />
-          </div>
-          <span
-            className={`absolute -bottom-0.5 -right-0.5 flex h-3 w-3 items-center justify-center rounded-full ${
-              connected ? "bg-signal" : "bg-silver-400"
-            } ring-2 ring-mist`}
-            aria-hidden
-          />
-        </div>
-        <div className="leading-tight">
-          <p className="text-[11px] font-semibold text-silver-500">
-            실시간 비전 연결
-          </p>
-          <h1 className="font-display text-[24px] font-medium tracking-[-0.022em] text-ink">
-            HUSKYLENS AI 비서
-          </h1>
+          {details && (
+            <div className="absolute bottom-4 left-4 right-4 hidden items-end justify-between gap-4 md:flex">
+              <div className="min-w-0 rounded-[8px] border border-white/12 bg-ink/86 px-4 py-3 text-white shadow-elevated">
+                <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold">
+                  <span className="rounded-[4px] bg-white/10 px-2.5 py-1 text-azure-100">
+                    알고리즘 {details.algorithm}
+                  </span>
+                  <span className="rounded-[4px] bg-signal/15 px-2.5 py-1 text-signal">
+                    인식 {details.detections.length}개
+                  </span>
+                  {details.labels.slice(0, 4).map((label) => (
+                    <span key={label} className="rounded-[4px] bg-white/10 px-2.5 py-1 text-azure-100/85">
+                      {label}
+                    </span>
+                  ))}
+                  {screenStatus.latency && (
+                    <span className="rounded-[4px] bg-white/10 px-2.5 py-1 text-azure-100/85">
+                      수신 {screenStatus.latency}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
+      <div className={`border-t border-white/10 bg-[#0c1726] px-4 ${showAddressEditor ? "py-4" : "py-2.5"}`}>
+        {showAddressEditor ? (
+          <>
+            <div className="grid gap-3 xl:grid-cols-[minmax(220px,1fr)_auto]">
+              <label className="min-w-0">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="block text-[12px] font-semibold text-azure-100/70">
+                    허스키렌즈 주소
+                  </span>
+                  {mcpUrl && !connected && (
+                    <span className="text-[11px] font-medium text-azure-100/45">
+                      연결 필요
+                    </span>
+                  )}
+                </div>
+                <input
+                  ref={addressInputRef}
+                  value={mcpUrl}
+                  onChange={(event) => onChangeUrl(event.target.value)}
+                  onBlur={onNormalizeUrl}
+                  onKeyDown={onAddressKeyDown}
+                  disabled={connection.loading}
+                  spellCheck={false}
+                  placeholder="10.241.134.243 또는 http://...:3000/sse"
+                  className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 font-mono text-[13px] text-white shadow-sunk outline-none transition placeholder:text-azure-100/40 focus:border-azure-300 disabled:cursor-wait disabled:opacity-70"
+                />
+              </label>
+              <div className="flex flex-wrap items-end gap-2">
+                <button
+                  type="button"
+                  onClick={onDiscover}
+                  disabled={discovery.loading || connection.loading}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-[6px] border border-white/20 bg-[#172337] px-4 text-[13px] font-semibold text-white transition hover:bg-[#1d2a40] disabled:opacity-60"
+                >
+                  {discovery.loading ? <Loader2 className="animate-spin" size={14} /> : <Radar size={14} />}
+                  {discovery.loading ? "찾는 중" : foundCount > 0 ? "다시 찾기" : "자동 찾기"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onConnect}
+                  disabled={connection.loading || !mcpUrl.trim()}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-[6px] bg-white px-5 text-[13px] font-semibold text-ink shadow-soft transition hover:bg-azure-50 disabled:opacity-60"
+                >
+                  {connection.loading ? <Loader2 className="animate-spin" size={14} /> : <Zap size={14} />}
+                  {connection.loading ? "연결 중" : connected ? "재연결" : "연결"}
+                </button>
+                {connected && (
+                  <button
+                    type="button"
+                    onClick={() => setEditingAddress(false)}
+                    className="inline-flex h-10 items-center justify-center rounded-[6px] border border-white/16 px-4 text-[13px] font-semibold text-azure-100/75 transition hover:bg-white/8"
+                  >
+                    닫기
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2 text-[12px] text-azure-100/60">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span>
+                  {helperText}
+                </span>
+                {details && <span>· {summarizeRecognition(context)}</span>}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex min-h-10 flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2 rounded-[6px] border border-white/10 bg-white/5 px-2.5 py-1.5 text-[12px] font-semibold text-azure-100/72">
+              <Wifi size={14} className="shrink-0 text-signal" />
+              <span className="truncate font-mono text-[11px] text-azure-100/86">
+                {helperText}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEditingAddress(true)}
+              className="inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-[6px] border border-white/22 bg-white/8 px-3.5 text-[12px] font-semibold text-white transition hover:bg-white/14"
+            >
+              <Settings2 size={13} />
+              주소 변경
+            </button>
+          </div>
+        )}
+
+        {showAddressEditor && discovery.data && discovery.data.length > 0 && (
+          <div className="mt-3 flex gap-2 overflow-x-auto pb-1 scroll-fade">
+            {discovery.data.map((url) => (
+              <button
+                type="button"
+                key={url}
+                onClick={() => onConnectUrl(url)}
+                disabled={connection.loading}
+                className={`shrink-0 rounded-[4px] border px-3 py-1.5 font-mono text-[11px] transition ${
+                  url === mcpUrl
+                    ? "border-signal/50 bg-signal/12 text-signal"
+                    : "border-white/12 bg-white/8 text-azure-100/70 hover:bg-white/14"
+                } disabled:cursor-wait disabled:opacity-60`}
+              >
+                {hostFromUrl(url)}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {error && (
+          <div className="mt-3 flex items-start gap-2 rounded-[6px] border border-alert/30 bg-alert/10 px-3 py-2.5 text-[12.5px] font-medium text-[#ffb8c2]">
+            <CircleAlert className="mt-0.5 shrink-0" size={14} />
+            <span className="leading-snug">{error}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ConnectionChecklist() {
+  const items = [
+    { icon: Power, label: "MCP Service 켜기" },
+    { icon: Wifi, label: "같은 Wi-Fi 연결" },
+    { icon: Radar, label: "자동 찾기 또는 주소 입력" }
+  ] as const;
+
+  return (
+    <div className="mt-5 flex max-w-full flex-wrap justify-center gap-2 text-left">
+      {items.map(({ icon: Icon, label }) => (
+        <span
+          key={label}
+          className="inline-flex h-8 items-center gap-2 rounded-[4px] border border-white/12 bg-white/[0.07] px-2.5 text-[12px] font-semibold text-azure-100/76"
+        >
+          <Icon size={13} />
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function CompactSettings({
+  hasServerApiKey,
+  openaiApiKey,
+  onChangeApiKey
+}: {
+  hasServerApiKey: boolean;
+  openaiApiKey: string;
+  onChangeApiKey: (v: string) => void;
+}) {
+  return (
+    <div className="absolute right-4 top-16 z-20 w-[min(420px,calc(100%-32px))] rounded-[8px] border border-white/14 bg-[#101b2b] p-4 text-white shadow-elevated">
+      <div className="mb-3 flex items-center gap-2">
+        <Settings2 size={16} className="text-azure-200" />
+        <h2 className="text-[14px] font-semibold">API 키</h2>
+      </div>
+      {!hasServerApiKey && (
+        <label className="block">
+          <span className="mb-1.5 block text-[12px] font-semibold text-azure-100/70">
+            API 키
+          </span>
+          <input
+            value={openaiApiKey}
+            onChange={(event) => onChangeApiKey(event.target.value)}
+            placeholder="sk-..."
+            type="password"
+            className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 font-mono text-[12px] text-white outline-none placeholder:text-azure-100/40 focus:border-azure-300"
+          />
+        </label>
+      )}
+      {hasServerApiKey && (
+        <div className="flex items-center gap-2 rounded-[6px] border border-signal/30 bg-signal/10 px-3 py-2 text-[12px] font-semibold text-signal">
+          <Check size={14} />
+          API 키 준비됨
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AppHeader({
+  connectedToCurrentUrl,
+  showSettings,
+  onToggleSettings
+}: {
+  connectedToCurrentUrl: boolean;
+  showSettings: boolean;
+  onToggleSettings: () => void;
+}) {
+  const connected = connectedToCurrentUrl;
+  return (
+    <header className="flex h-12 items-center justify-between gap-3 rounded-[8px] border border-silver-200 bg-[#f9fbfe] px-3 shadow-crisp">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] bg-ink text-azure-200">
+          <Aperture size={17} strokeWidth={1.5} />
+          <span
+            className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ${
+              connected ? "bg-signal" : "bg-silver-400"
+            } ring-2 ring-[#f9fbfe]`}
+            aria-hidden
+          />
+        </div>
+        <div className="min-w-0 leading-tight">
+          <h1 className="truncate font-display text-[18px] font-semibold tracking-[-0.01em] text-ink">
+            HUSKYLENS AI 비서
+          </h1>
+        </div>
+        <span className="hidden h-5 w-px bg-silver-200 sm:block" />
+        <span className="hidden items-center gap-1.5 rounded-[4px] border border-silver-200 bg-white px-2 py-1 text-[11px] font-semibold text-silver-600 sm:inline-flex">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-signal" : "bg-silver-400"}`}
+            aria-hidden
+          />
+          {connected ? "연결" : "준비"}
+        </span>
+      </div>
+
       <div className="flex items-center gap-2">
-        <DeviceStatusPill
-          connected={connected}
-          loading={connection.loading}
-          url={connection.data?.url}
-        />
-        <ModelChip model={model} />
         <button
           type="button"
           onClick={onToggleSettings}
           aria-label="설정 패널"
-          className="lift relative inline-flex h-11 w-11 items-center justify-center rounded-full border border-silver-200 bg-white/80 text-ink shadow-crisp transition hover:bg-white"
+          className="lift relative inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-silver-200 bg-white text-ink transition hover:bg-silver-50"
         >
-          {showSettings ? <X size={17} /> : <Settings2 size={17} />}
+          {showSettings ? <X size={15} /> : <Settings2 size={15} />}
         </button>
       </div>
     </header>
   );
 }
 
-function DeviceStatusPill({
-  connected,
-  loading,
-  url
-}: {
-  connected: boolean;
-  loading: boolean;
-  url?: string;
-}) {
-  const host = url ? hostFromUrl(url) : "";
-  if (loading) {
-    return (
-      <div className="hidden items-center gap-2 rounded-full border border-silver-200 bg-white/70 px-3.5 py-2 text-silver-700 shadow-crisp sm:inline-flex">
-        <Loader2 className="animate-spin" size={13} />
-        <span className="text-[12px] font-semibold">
-          연결 중
-        </span>
-      </div>
-    );
-  }
-  if (!connected) {
-    return (
-      <div className="hidden items-center gap-2 rounded-full border border-silver-200 bg-white/70 px-3.5 py-2 text-silver-600 shadow-crisp sm:inline-flex">
-        <WifiOff size={13} />
-        <span className="text-[12px] font-semibold">
-          연결 전
-        </span>
-      </div>
-    );
-  }
-  return (
-    <div className="hidden items-center gap-2.5 rounded-full border border-signal/35 bg-signal/10 px-3.5 py-2 text-signal-deep shadow-crisp sm:inline-flex">
-      <span className="relative flex h-2 w-2">
-        <span className="absolute inset-0 animate-ping rounded-full bg-signal opacity-70" />
-        <span className="relative h-2 w-2 rounded-full bg-signal" />
-      </span>
-      <span className="text-[12px] font-semibold">
-        연결됨
-      </span>
-      {host && (
-        <span className="font-mono text-[10px] text-signal-deep/70">{host}</span>
-      )}
-      <span className="signal-bars flex items-end gap-[2px] text-signal-deep">
-        <span />
-        <span />
-        <span />
-      </span>
-    </div>
-  );
-}
-
-function ModelChip({ model }: { model: string }) {
-  return (
-    <div className="hidden items-center gap-2 rounded-full border border-silver-200 bg-white/80 px-3.5 py-2 text-silver-700 shadow-crisp md:inline-flex">
-      <Cpu size={13} className="text-azure-500" />
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em]">
-        {model}
-      </span>
-    </div>
-  );
-}
-
-/* ════════════════════════════════════════════════════════════ */
-/*  SCENE STRIP — appears above chat, shows live capture state  */
-/* ════════════════════════════════════════════════════════════ */
-
 function SceneStrip({
   state,
   connectedAt,
-  mcpUrl,
-  model,
+  canClearConversation,
   onClearConversation
 }: {
   state: "live" | "ready" | "idle";
   connectedAt?: string;
-  mcpUrl?: string;
-  model: string;
+  canClearConversation: boolean;
   onClearConversation: () => void;
 }) {
   const map = {
     live: {
       icon: Activity,
-      label: "장면 대기",
+      label: "질문 가능",
       tone: "border-azure-200 bg-azure-50/60 text-azure-700",
-      hint: "현재 장면을 읽을 수 있습니다"
+      hint: "질문하면 현재 장면을 읽습니다"
     },
     ready: {
       icon: Eye,
@@ -657,46 +1040,46 @@ function SceneStrip({
   const Icon = cfg.icon;
 
   return (
-    <div className="border-b border-white/60 bg-white/40 px-5 py-4 sm:px-7">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+    <div className="border-b border-silver-200 bg-[#f3f6fa] px-5 py-3 sm:px-6">
+      <div className="flex min-w-0 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <h2 className="shrink-0 text-[13px] font-semibold text-ink">
+            AI 채팅
+          </h2>
+          <span className="h-4 w-px bg-silver-200" aria-hidden />
           <span
-            className={`inline-flex h-8 items-center gap-2 rounded-full border px-3 ${cfg.tone}`}
+            className={`inline-flex h-7 shrink-0 items-center gap-2 rounded-[4px] border px-2.5 ${cfg.tone}`}
           >
             <Icon size={13} />
-            <span className="font-mono text-[10px] uppercase tracking-[0.2em] font-medium">
+            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.16em]">
               {cfg.label}
             </span>
           </span>
-          <p className="hidden text-[13px] text-silver-700 sm:block">{cfg.hint}</p>
+          <p className="hidden min-w-0 truncate text-[13px] text-silver-700 sm:block">{cfg.hint}</p>
         </div>
-        <div className="hidden items-center gap-3 font-mono text-[10px] uppercase tracking-[0.18em] text-silver-500 md:flex">
+        <div className="flex shrink-0 items-center gap-2 text-silver-500">
           {connectedAt && (
-            <>
-            <span className="text-silver-400">연결</span>
-            <span>{formatTime(new Date(connectedAt).getTime())}</span>
-            <span className="h-3 w-px bg-silver-300" />
-          </>
-        )}
-          <span className="text-silver-400">모델</span>
-          <span className="text-silver-700">{model}</span>
-          <button
-            type="button"
-            onClick={onClearConversation}
-            className="inline-flex items-center gap-1.5 rounded-full border border-silver-200 bg-white/70 px-2.5 py-1 text-[10px] font-semibold text-silver-600 shadow-crisp transition hover:border-alert/30 hover:text-alert-deep"
-          >
-            <Trash2 size={11} />
-            대화 초기화
-          </button>
+            <span className="hidden items-center gap-1.5 whitespace-nowrap font-mono text-[10px] text-silver-500 2xl:inline-flex">
+              <span className="text-silver-400">연결</span>
+              <span>{formatTime(new Date(connectedAt).getTime())}</span>
+              <span className="h-3 w-px bg-silver-300" />
+            </span>
+          )}
+          {canClearConversation && (
+            <button
+              type="button"
+              onClick={onClearConversation}
+              aria-label="대화 초기화"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-silver-200 bg-white/80 text-silver-600 shadow-crisp transition hover:border-alert/30 hover:text-alert-deep"
+            >
+              <Trash2 size={11} />
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 }
-
-/* ════════════════════════════════════════════════════════════ */
-/*  CHAT BUBBLES                                                */
-/* ════════════════════════════════════════════════════════════ */
 
 function ChatBubble({ message, index }: { message: ChatMessage; index: number }) {
   const isUser = message.role === "user";
@@ -704,103 +1087,56 @@ function ChatBubble({ message, index }: { message: ChatMessage; index: number })
   const visibleText = streaming
     ? message.text.slice(0, message.displayLen ?? 0)
     : message.text;
-  const hasAttachments = message.attachments && message.attachments.length > 0;
-  const isEmptyBubble = !visibleText && !hasAttachments;
+  const isEmptyBubble = !visibleText;
 
   return (
     <div
       className={`reveal flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}
       style={{ animationDelay: `${Math.min(index * 50, 200)}ms` }}
     >
-      {!isUser && <Avatar role="assistant" />}
       <div
-        className={`flex max-w-[78%] flex-col ${isUser ? "items-end" : "items-start"}`}
+        className={`flex w-full max-w-[88%] gap-3 rounded-[6px] border px-3 py-3 ${
+          isUser
+            ? "border-ink/20 bg-ink text-mist"
+            : "border-silver-200 bg-white/82 text-ink"
+        }`}
       >
-        <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] font-semibold text-silver-500">
-          <span>{isUser ? "나" : "AI"}</span>
-          <span className="h-1 w-1 rounded-full bg-silver-400" />
-          <span>{formatTime(message.at)}</span>
-          {streaming && (
-            <span className="ml-1 inline-flex items-center gap-1 text-azure-600">
-              <span className="h-1 w-1 animate-pulse rounded-full bg-azure-500" />
-              작성 중
-            </span>
-          )}
-        </div>
-
-        {hasAttachments && (
-          <AttachmentGallery
-            attachments={message.attachments!}
-            align={isUser ? "right" : "left"}
-          />
-        )}
-
-        {(visibleText || streaming || !hasAttachments) && (
+        <Avatar role={message.role} />
+        <div className="min-w-0 flex-1">
           <div
-            className={`rounded-[22px] text-[15px] leading-[1.65] shadow-soft ${
-              isEmptyBubble ? "px-3 py-2" : "px-4 py-3"
-            } ${
-              isUser
-                ? "bg-ink text-mist"
-                : "border border-white/80 bg-white/85 text-ink"
+            className={`mb-1 flex items-center gap-1.5 text-[11px] font-semibold ${
+              isUser ? "text-mist/60" : "text-silver-500"
             }`}
-            style={
-              isUser
-                ? {
-                    boxShadow:
-                      "0 1px 0 rgba(255,255,255,0.06) inset, 0 12px 28px -8px rgba(12,20,36,0.35)"
-                  }
-                : undefined
-            }
           >
-            {isUser ? (
-              <p className="whitespace-pre-wrap">{visibleText}</p>
-            ) : (
-              <div className="markdown-body">
-                <MarkdownMessage text={visibleText} isUser={false} />
-                {streaming && <TypingCursor />}
-              </div>
+            <span>{isUser ? "나" : "AI"}</span>
+            <span className={`h-1 w-1 rounded-full ${isUser ? "bg-mist/35" : "bg-silver-400"}`} />
+            <span>{formatTime(message.at)}</span>
+            {streaming && (
+              <span className={`ml-1 inline-flex items-center gap-1 ${isUser ? "text-mist/70" : "text-azure-600"}`}>
+                <span className={`h-1 w-1 animate-pulse rounded-full ${isUser ? "bg-mist/70" : "bg-azure-500"}`} />
+                작성 중
+              </span>
             )}
           </div>
-        )}
-      </div>
-      {isUser && <Avatar role="user" />}
-    </div>
-  );
-}
 
-function AttachmentGallery({
-  attachments,
-  align
-}: {
-  attachments: string[];
-  align: "left" | "right";
-}) {
-  const cols = attachments.length === 1 ? "grid-cols-1" : "grid-cols-2";
-  return (
-    <div
-      className={`mb-2 grid w-full gap-1.5 ${cols} ${
-        align === "right" ? "justify-items-end" : "justify-items-start"
-      }`}
-    >
-      {attachments.map((src, i) => (
-        <a
-          key={i}
-          href={src}
-          target="_blank"
-          rel="noreferrer"
-          className="group relative block overflow-hidden rounded-[14px] border border-white/70 bg-white/40 shadow-soft transition hover:shadow-elevated"
-          style={{
-            maxWidth: attachments.length === 1 ? 320 : 180
-          }}
-        >
-          <img
-            src={src}
-            alt=""
-            className="block max-h-[220px] w-full object-cover transition group-hover:scale-[1.02]"
-          />
-        </a>
-      ))}
+          {(visibleText || streaming) && (
+            <div
+              className={`text-[15px] leading-[1.65] ${
+                isEmptyBubble ? "py-1" : ""
+              }`}
+            >
+              {isUser ? (
+                <p className="whitespace-pre-wrap">{visibleText}</p>
+              ) : (
+                <div className="markdown-body">
+                  <MarkdownMessage text={visibleText} isUser={false} />
+                  {streaming && <TypingCursor />}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -835,7 +1171,7 @@ function MarkdownMessage({ text, isUser }: { text: string; isUser: boolean }) {
         ),
         code: ({ children }) => (
           <code
-            className={`rounded-md px-1.5 py-0.5 text-[0.92em] ${
+            className={`rounded-[4px] px-1.5 py-0.5 text-[0.92em] ${
               isUser ? "bg-white/15 text-white" : "bg-silver-100 text-ink"
             }`}
           >
@@ -844,7 +1180,7 @@ function MarkdownMessage({ text, isUser }: { text: string; isUser: boolean }) {
         ),
         pre: ({ children }) => (
           <pre
-            className={`my-3 overflow-auto rounded-2xl p-3 text-sm ${
+            className={`my-3 overflow-auto rounded-[6px] p-3 text-sm ${
               isUser ? "bg-white/15 text-white" : "bg-ink text-mist"
             }`}
           >
@@ -874,22 +1210,22 @@ function MarkdownMessage({ text, isUser }: { text: string; isUser: boolean }) {
 function ThinkingBubble() {
   return (
     <div className="reveal flex justify-start gap-3">
-      <Avatar role="assistant" />
-      <div className="flex flex-col items-start">
-        <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] font-semibold text-silver-500">
-          <span>AI</span>
-          <span className="h-1 w-1 rounded-full bg-azure-400" />
-          <span>작성 중</span>
-        </div>
-        <div className="flex items-center gap-3 rounded-[22px] border border-white/80 bg-white/85 px-4 py-3 text-azure-700 shadow-soft">
-          <span className="typing-dots inline-flex items-center">
-            <span />
-            <span />
-            <span />
-          </span>
-          <span className="text-[13px] font-medium tracking-tight">
-            카메라 데이터를 읽고 답변을 작성하는 중
-          </span>
+      <div className="flex w-full max-w-[88%] gap-3 rounded-[6px] border border-silver-200 bg-white/82 px-3 py-3 text-azure-700">
+        <Avatar role="assistant" />
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-silver-500">
+            <span>AI</span>
+            <span className="h-1 w-1 rounded-full bg-azure-400" />
+            <span>작성 중</span>
+          </div>
+          <div className="flex items-center gap-3 text-[13px] font-medium tracking-tight">
+            <span className="typing-dots inline-flex items-center">
+              <span />
+              <span />
+              <span />
+            </span>
+            <span>카메라 데이터를 읽고 답변을 작성하는 중</span>
+          </div>
         </div>
       </div>
     </div>
@@ -899,24 +1235,17 @@ function ThinkingBubble() {
 function Avatar({ role }: { role: "user" | "assistant" }) {
   if (role === "user") {
     return (
-      <div className="mt-7 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-azure-200 shadow-soft">
-        <UserRound size={16} />
+      <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-white/10 bg-white/10 text-mist">
+        <UserRound size={15} />
       </div>
     );
   }
   return (
-    <div className="relative mt-7 h-9 w-9 shrink-0">
-      <div className="absolute inset-0 rounded-full bg-azure-200 opacity-30 blur-md" />
-      <div className="relative flex h-9 w-9 items-center justify-center rounded-full border border-white bg-white text-azure-600 shadow-soft">
-        <Aperture size={16} strokeWidth={1.6} />
-      </div>
+    <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-silver-200 bg-[#f6f8fb] text-azure-600">
+      <Aperture size={15} strokeWidth={1.6} />
     </div>
   );
 }
-
-/* ════════════════════════════════════════════════════════════ */
-/*  COMPOSER                                                    */
-/* ════════════════════════════════════════════════════════════ */
 
 type ComposerProps = {
   value: string;
@@ -926,9 +1255,7 @@ type ComposerProps = {
   disabled: boolean;
   loading: boolean;
   sceneState: "live" | "ready" | "idle";
-  attachments: string[];
-  onAddFiles: (files: FileList | File[]) => void;
-  onRemoveAttachment: (index: number) => void;
+  needsApiKey: boolean;
 };
 
 const Composer = React.forwardRef<HTMLTextAreaElement, ComposerProps>(
@@ -941,178 +1268,73 @@ const Composer = React.forwardRef<HTMLTextAreaElement, ComposerProps>(
       disabled,
       loading,
       sceneState,
-      attachments,
-      onAddFiles,
-      onRemoveAttachment
+      needsApiKey
     },
     ref
   ) {
     const [focused, setFocused] = useState(false);
-    const [dragOver, setDragOver] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
-    const attachLimitReached = attachments.length >= MAX_ATTACHMENTS;
 
-    const sceneText: Record<typeof sceneState, string> = {
-      live: "카메라 인식 대기",
+    const statusText = needsApiKey
+      ? "API 키 필요"
+      : ({
+      live: "질문 가능",
       ready: "인식 데이터 준비됨",
       idle: "장치 미연결"
-    };
-    const sceneTone: Record<typeof sceneState, string> = {
+    } as const)[sceneState];
+    const statusTone = needsApiKey
+      ? "text-[#8a5a18]"
+      : ({
       live: "text-azure-600",
       ready: "text-signal-deep",
       idle: "text-silver-500"
-    };
-
-    function openFilePicker() {
-      fileInputRef.current?.click();
-    }
-
-    function handleFiles(files: FileList | null) {
-      if (files && files.length > 0) onAddFiles(files);
-    }
-
-    function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
-      const items = Array.from(event.clipboardData?.items ?? []);
-      const files: File[] = [];
-      for (const item of items) {
-        if (item.kind === "file") {
-          const file = item.getAsFile();
-          if (file && file.type.startsWith("image/")) files.push(file);
-        }
-      }
-      if (files.length > 0) {
-        event.preventDefault();
-        onAddFiles(files);
-      }
-    }
-
-    function handleDrop(event: React.DragEvent<HTMLDivElement>) {
-      event.preventDefault();
-      setDragOver(false);
-      if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
-        onAddFiles(event.dataTransfer.files);
-      }
-    }
+    } as const)[sceneState];
+    const placeholderText = needsApiKey
+      ? "API 키를 입력하면 질문할 수 있습니다"
+      : ({
+      live: "허스키렌즈가 보는 장면에 대해 물어보세요…",
+      ready: "지금 보이는 장면에 대해 물어보세요…",
+      idle: "허스키렌즈를 연결하면 질문할 수 있습니다"
+    } as const)[sceneState];
 
     return (
       <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (!dragOver) setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={handleDrop}
-        className={`relative overflow-hidden rounded-[22px] border bg-white transition ${
-          dragOver
-            ? "border-azure-400 shadow-glow"
-            : focused
-              ? "border-azure-300 shadow-glow"
-              : "border-silver-200 shadow-crisp"
+        className={`relative overflow-hidden rounded-[8px] border bg-white transition ${
+          focused ? "border-azure-300 shadow-glow" : "border-silver-200 shadow-crisp"
         }`}
       >
-        {dragOver && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] border-2 border-dashed border-azure-400 bg-azure-50/90 font-mono text-[11px] uppercase tracking-[0.2em] text-azure-700">
-            <ImagePlus size={16} className="mr-2" />
-            이미지를 드롭해서 첨부
-          </div>
-        )}
-
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 border-b border-silver-100 bg-silver-50/40 px-3.5 py-3">
-            {attachments.map((src, i) => (
-              <div
-                key={i}
-                className="group relative h-[68px] w-[68px] overflow-hidden rounded-[12px] border border-silver-200 bg-white shadow-soft"
-              >
-                <img src={src} alt="" className="h-full w-full object-cover" />
-                <button
-                  type="button"
-                  onClick={() => onRemoveAttachment(i)}
-                  aria-label="첨부 제거"
-                  className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-ink/80 text-white opacity-0 backdrop-blur transition group-hover:opacity-100"
-                >
-                  <X size={10} />
-                </button>
-              </div>
-            ))}
-            {!attachLimitReached && (
-              <button
-                type="button"
-                onClick={openFilePicker}
-                className="lift inline-flex h-[68px] w-[68px] flex-col items-center justify-center gap-0.5 rounded-[12px] border border-dashed border-silver-300 bg-white text-silver-500 transition hover:border-azure-300 hover:text-azure-600"
-              >
-                <ImagePlus size={16} />
-                <span className="font-mono text-[9px] uppercase tracking-[0.18em]">
-                  추가
-                </span>
-              </button>
-            )}
-          </div>
-        )}
-
         <textarea
           ref={ref}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
-          onPaste={handlePaste}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
-          placeholder="허스키렌즈가 보고 있는 장면에 대해 물어보세요…"
+          placeholder={placeholderText}
           className="block min-h-[90px] w-full border-0 bg-transparent px-5 pt-4 text-[15px] leading-[1.6] outline-none placeholder:text-silver-400"
-        />
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(event) => {
-            handleFiles(event.target.files);
-            event.target.value = "";
-          }}
         />
 
         <div className="flex items-center justify-between gap-3 border-t border-silver-100 bg-pearl/60 px-3.5 py-2.5">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={openFilePicker}
-              disabled={attachLimitReached}
-              aria-label="이미지 첨부"
-              className="lift inline-flex h-9 w-9 items-center justify-center rounded-full border border-silver-200 bg-white text-silver-700 transition hover:border-azure-300 hover:text-azure-600 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <ImagePlus size={15} />
-            </button>
-            <span className="h-4 w-px bg-silver-200" />
             <span
-              className={`inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] ${sceneTone[sceneState]}`}
+              className={`inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] ${statusTone}`}
             >
               <Eye size={12} />
-              {sceneText[sceneState]}
-            </span>
-            {attachments.length > 0 && (
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-azure-600">
-                · {attachments.length}/{MAX_ATTACHMENTS} 첨부됨
-              </span>
-            )}
-            <span className="hidden text-[11px] font-medium text-silver-400 lg:inline-flex">
-              · Enter 전송 · Shift+Enter 줄바꿈
+              {statusText}
             </span>
           </div>
           <button
             type="button"
             onClick={onSubmit}
             disabled={disabled}
-            className="inline-flex h-10 items-center gap-2 rounded-full bg-ink px-4 text-[13px] font-medium text-white transition hover:bg-char active:translate-y-px disabled:cursor-not-allowed disabled:bg-silver-300 disabled:text-silver-500"
+            aria-label="전송"
+            className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-[6px] bg-ink px-3.5 text-[13px] font-medium text-white transition hover:bg-char active:translate-y-px disabled:cursor-not-allowed disabled:bg-silver-300 disabled:text-silver-500 xl:px-4"
           >
             {loading ? (
               <Loader2 className="animate-spin" size={14} />
             ) : (
               <Send size={14} />
             )}
-            <span className="font-semibold">전송</span>
+            <span className="hidden font-semibold xl:inline">전송</span>
           </button>
         </div>
       </div>
@@ -1122,7 +1344,7 @@ const Composer = React.forwardRef<HTMLTextAreaElement, ComposerProps>(
 
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div className="reveal mb-3 flex items-start gap-2.5 rounded-2xl border border-alert/35 bg-alert/8 px-4 py-3 text-[13.5px] text-alert-deep shadow-soft">
+    <div className="reveal mb-3 flex items-start gap-2.5 rounded-[8px] border border-alert/35 bg-alert/8 px-4 py-3 text-[13.5px] text-alert-deep shadow-soft">
       <CircleAlert className="mt-0.5 shrink-0" size={16} />
       <div className="min-w-0 flex-1 leading-[1.55]">
         <p className="mb-0.5 text-[12px] font-semibold text-alert-deep/70">
@@ -1133,504 +1355,6 @@ function ErrorBanner({ message }: { message: string }) {
     </div>
   );
 }
-
-/* ════════════════════════════════════════════════════════════ */
-/*  SIDEBAR PANELS                                               */
-/* ════════════════════════════════════════════════════════════ */
-
-function Panel({
-  number,
-  title,
-  subtitle,
-  icon: Icon,
-  children
-}: {
-  number: string;
-  title: string;
-  subtitle: string;
-  icon: React.ComponentType<{ size?: number; className?: string; strokeWidth?: number }>;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-[24px] panel-glass grain p-5">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-[12px] bg-ink text-azure-200 shadow-soft">
-            <Icon size={15} strokeWidth={1.6} />
-          </div>
-          <div className="leading-tight">
-            <p className="text-[11px] font-semibold text-silver-500">
-              {number} · {subtitle}
-            </p>
-            <h2 className="text-[15px] font-semibold tracking-[-0.012em] text-ink">
-              {title}
-            </h2>
-          </div>
-        </div>
-      </div>
-      <div className="hairline mb-4" />
-      {children}
-    </section>
-  );
-}
-
-type FlowStatus = "idle" | "loading" | "success" | "error";
-
-function FlowStep({
-  index,
-  title,
-  detail,
-  status
-}: {
-  index: string;
-  title: string;
-  detail: string;
-  status: FlowStatus;
-}) {
-  const tone: Record<FlowStatus, string> = {
-    idle: "border-silver-200 bg-white text-silver-500",
-    loading: "border-azure-200 bg-azure-50 text-azure-700",
-    success: "border-signal/30 bg-signal/8 text-signal-deep",
-    error: "border-alert/30 bg-alert/8 text-alert-deep"
-  };
-  const dot: Record<FlowStatus, string> = {
-    idle: "bg-silver-300",
-    loading: "bg-azure-500 animate-pulse",
-    success: "bg-signal",
-    error: "bg-alert"
-  };
-  const label: Record<FlowStatus, string> = {
-    idle: "대기",
-    loading: "진행 중",
-    success: "완료",
-    error: "확인 필요"
-  };
-
-  return (
-    <div className={`rounded-[12px] border px-3 py-2.5 ${tone[status]}`}>
-      <div className="flex items-start gap-2.5">
-        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/80 text-[11px] font-semibold shadow-crisp">
-          {index}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-[13px] font-semibold text-ink">{title}</p>
-            <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium">
-              <span className={`h-1.5 w-1.5 rounded-full ${dot[status]}`} />
-              {label[status]}
-            </span>
-          </div>
-          <p className="mt-0.5 truncate text-[12px] leading-snug text-silver-600">
-            {detail}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ConnectionPanel({
-  mcpUrl,
-  onChangeUrl,
-  onDiscover,
-  onConnect,
-  onReadScene,
-  connection,
-  discovery,
-  recognition
-}: {
-  mcpUrl: string;
-  onChangeUrl: (value: string) => void;
-  onDiscover: () => void;
-  onConnect: () => void;
-  onReadScene: () => void;
-  connection: ApiState<ConnectionData>;
-  discovery: ApiState<string[]>;
-  recognition: ApiState;
-}) {
-  const error = connection.error || discovery.error || recognition.error;
-  const empty = discovery.data?.length === 0 ? "같은 Wi-Fi에서 MCP 장치를 찾지 못했습니다." : "";
-  const foundCount = discovery.data?.length ?? 0;
-  const connected = Boolean(connection.data);
-  const recognitionSummary = summarizeRecognition(recognition.data);
-  const selectedFoundUrl = Boolean(discovery.data?.includes(mcpUrl));
-  const discoveryStatus = discovery.loading
-    ? "loading"
-    : discovery.error || empty
-      ? "error"
-      : foundCount > 0
-        ? "success"
-        : "idle";
-  const connectionStatus = connection.loading
-    ? "loading"
-    : connection.error
-      ? "error"
-      : connected
-        ? "success"
-        : "idle";
-  const recognitionStatus = recognition.loading
-    ? "loading"
-    : recognition.error
-      ? "error"
-      : recognition.data
-        ? "success"
-        : "idle";
-
-  return (
-    <Panel number="01" title="허스키렌즈 연결" subtitle="장치 상태" icon={Wifi}>
-      <label className="block">
-        <span className="mb-1.5 inline-block text-[12px] font-semibold text-silver-700">
-          MCP 주소
-        </span>
-        <input
-          value={mcpUrl}
-          onChange={(event) => onChangeUrl(event.target.value)}
-          spellCheck={false}
-          className="h-11 w-full rounded-[12px] border border-silver-200 bg-white px-3.5 font-mono text-[13px] text-ink shadow-sunk outline-none transition focus:border-azure-300"
-        />
-      </label>
-
-      <div className="mt-3 space-y-2 rounded-[16px] border border-silver-200 bg-white/70 p-2.5 shadow-crisp">
-        <FlowStep
-          index="1"
-          title="자동 찾기"
-          status={discoveryStatus}
-          detail={
-            discovery.loading
-              ? "같은 Wi-Fi에서 허스키렌즈를 찾는 중"
-              : foundCount > 0
-                ? `${foundCount}개 발견${selectedFoundUrl ? " · 현재 주소 선택됨" : ""}`
-                : empty || "아직 실행하지 않음"
-          }
-        />
-        <FlowStep
-          index="2"
-          title="연결"
-          status={connectionStatus}
-          detail={
-            connection.loading
-              ? "MCP 도구 목록을 확인하는 중"
-              : connection.data
-                ? `${hostFromUrl(connection.data.url)} · ${connection.data.tools.length}개 도구`
-                : connection.error || "주소 확인 후 연결 필요"
-          }
-        />
-        <FlowStep
-          index="3"
-          title="현재 장면"
-          status={recognitionStatus}
-          detail={
-            recognition.loading
-              ? "카메라 인식 결과를 읽는 중"
-              : recognition.data
-                ? recognitionSummary
-                : recognition.error || "연결 후 장면 읽기 가능"
-          }
-        />
-      </div>
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={onDiscover}
-          disabled={discovery.loading}
-          className="lift inline-flex h-10 items-center justify-center gap-2 rounded-[12px] border border-silver-200 bg-white text-[13px] font-medium text-ink shadow-crisp transition hover:bg-frost disabled:opacity-60"
-        >
-          {discovery.loading ? (
-            <Loader2 className="animate-spin" size={14} />
-          ) : (
-            <Radar size={14} className="text-azure-500" />
-          )}
-          {discovery.loading ? "찾는 중" : foundCount > 0 ? "다시 찾기" : "자동 찾기"}
-        </button>
-        <button
-          type="button"
-          onClick={onConnect}
-          disabled={connection.loading}
-          className="lift inline-flex h-10 items-center justify-center gap-2 rounded-[12px] bg-ink text-[13px] font-medium text-white shadow-elevated transition hover:bg-char disabled:opacity-60"
-        >
-          {connection.loading ? (
-            <Loader2 className="animate-spin" size={14} />
-          ) : (
-            <Zap size={14} className="text-azure-300" />
-          )}
-          {connection.loading ? "연결 중" : connected ? "재연결" : "연결"}
-        </button>
-      </div>
-
-      <button
-        type="button"
-        onClick={onReadScene}
-        disabled={recognition.loading || !connection.data}
-        className="lift mt-2.5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-[12px] border border-azure-200 bg-azure-50 text-[13px] font-medium text-azure-700 transition hover:bg-azure-100 disabled:cursor-not-allowed disabled:border-silver-200 disabled:bg-silver-50 disabled:text-silver-400"
-      >
-        {recognition.loading ? (
-          <Loader2 className="animate-spin" size={14} />
-        ) : (
-          <Eye size={14} />
-        )}
-        {recognition.loading ? "읽는 중" : recognition.data ? "현재 장면 다시 읽기" : "현재 장면 읽기"}
-      </button>
-
-      {(error || empty) && <ErrorChip message={error || empty} />}
-
-      {discovery.data && discovery.data.length > 0 && (
-        <div className="mt-3 space-y-1.5">
-          <p className="text-[12px] font-semibold text-silver-700">
-            발견된 주소
-          </p>
-          {discovery.data.map((url) => (
-            <button
-              type="button"
-              key={url}
-              onClick={() => onChangeUrl(url)}
-              className={`group flex w-full items-center justify-between gap-2 rounded-[12px] border px-3 py-2 text-left transition hover:border-azure-300 hover:bg-azure-50 ${
-                url === mcpUrl
-                  ? "border-azure-300 bg-azure-50"
-                  : "border-silver-200 bg-white"
-              }`}
-            >
-              <span className="font-mono text-[12px] text-silver-700 group-hover:text-azure-700">
-                {url}
-              </span>
-              {url === mcpUrl ? (
-                <Check size={14} className="text-azure-600" />
-              ) : (
-                <ChevronRight size={14} className="text-silver-400 group-hover:text-azure-500" />
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {connection.data && (
-        <div className="mt-4 space-y-2.5">
-          <div className="flex items-center gap-2 rounded-[12px] border border-signal/30 bg-signal/8 px-3 py-2.5">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inset-0 animate-ping rounded-full bg-signal opacity-70" />
-              <span className="relative h-2 w-2 rounded-full bg-signal" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-signal-deep">
-                연결됨 · {formatRelative(connection.data.connectedAt)}
-              </p>
-              <p className="truncate font-mono text-[11px] text-silver-700">
-                {connection.data.url}
-              </p>
-            </div>
-          </div>
-
-          {connection.data.tools.length > 0 && (
-            <div className="space-y-1.5">
-              <p className="text-[12px] font-semibold text-silver-700">
-                사용 가능한 기능 · {connection.data.tools.length}
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {connection.data.tools.map((tool) => (
-                  <span
-                    key={tool.name}
-                    className="inline-flex items-center gap-1 rounded-md border border-silver-200 bg-white px-2 py-1 font-mono text-[10.5px] text-silver-700 shadow-crisp"
-                  >
-                    <Hash size={9} className="text-azure-500" />
-                    {tool.name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function ModelPanel({
-  hasServerApiKey,
-  openaiApiKey,
-  onChangeApiKey,
-  model,
-  onChangeModel,
-  reasoningEffort,
-  onChangeReasoning
-}: {
-  hasServerApiKey: boolean;
-  openaiApiKey: string;
-  onChangeApiKey: (v: string) => void;
-  model: string;
-  onChangeModel: (v: string) => void;
-  reasoningEffort: string;
-  onChangeReasoning: (v: string) => void;
-}) {
-  return (
-    <Panel number="02" title="언어 모델" subtitle="답변 설정" icon={Cpu}>
-      {hasServerApiKey ? (
-        <div className="flex items-center gap-2 rounded-[12px] border border-signal/30 bg-signal/8 px-3 py-2.5 text-signal-deep">
-          <Check size={14} />
-          <span className="text-[13px] font-medium">서버 API 키 사용 중</span>
-        </div>
-      ) : (
-        <div className="space-y-2.5">
-          <div className="flex items-center gap-2 rounded-[12px] border border-warn/35 bg-warn/8 px-3 py-2.5 text-[#8a5a18]">
-            <CircleAlert size={14} />
-            <span className="text-[13px] font-medium">API 키 입력 필요</span>
-          </div>
-          <label className="block">
-            <span className="mb-1.5 inline-block font-mono text-[10px] uppercase tracking-[0.22em] text-silver-500">
-              OpenAI API 키
-            </span>
-            <input
-              value={openaiApiKey}
-              onChange={(event) => onChangeApiKey(event.target.value)}
-              placeholder="sk-..."
-              type="password"
-              className="h-11 w-full rounded-[12px] border border-silver-200 bg-white px-3.5 font-mono text-[13px] text-ink shadow-sunk outline-none transition focus:border-azure-300"
-            />
-          </label>
-        </div>
-      )}
-
-      <div className="mt-3 grid grid-cols-[1fr_120px] gap-2.5">
-        <label className="block">
-          <span className="mb-1.5 inline-block font-mono text-[10px] uppercase tracking-[0.22em] text-silver-500">
-            모델
-          </span>
-          <input
-            value={model}
-            onChange={(event) => onChangeModel(event.target.value)}
-            spellCheck={false}
-            className="h-11 w-full rounded-[12px] border border-silver-200 bg-white px-3.5 font-mono text-[13px] text-ink shadow-sunk outline-none transition focus:border-azure-300"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1.5 inline-block font-mono text-[10px] uppercase tracking-[0.22em] text-silver-500">
-            추론
-          </span>
-          <div className="relative">
-            <select
-              value={reasoningEffort}
-              onChange={(event) => onChangeReasoning(event.target.value)}
-              className="h-11 w-full appearance-none rounded-[12px] border border-silver-200 bg-white pl-3.5 pr-8 font-mono text-[12px] text-ink shadow-sunk outline-none transition focus:border-azure-300"
-            >
-              <option value="minimal">minimal</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-            </select>
-            <ChevronRight
-              size={13}
-              className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rotate-90 text-silver-400"
-            />
-          </div>
-        </label>
-      </div>
-
-    </Panel>
-  );
-}
-
-function VisionDataPanel({
-  context,
-  live
-}: {
-  context: unknown;
-  live: boolean;
-}) {
-  const text = formatData(context);
-  const empty = !context;
-  const details = getRecognitionDetails(context);
-
-  return (
-    <Panel number="03" title="비전 데이터" subtitle="현재 장면" icon={Terminal}>
-      {details && (
-        <div className="mb-3 space-y-2 rounded-[14px] border border-silver-200 bg-white/75 p-3 shadow-crisp">
-          <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold text-silver-700">
-            <span className="rounded-full bg-azure-50 px-2.5 py-1 text-azure-700">
-              알고리즘 {details.algorithm}
-            </span>
-            <span className="rounded-full bg-signal/10 px-2.5 py-1 text-signal-deep">
-              인식 {details.detections.length}개
-            </span>
-            <span className="rounded-full bg-silver-100 px-2.5 py-1 text-silver-700">
-              이미지 {details.resources.length}장
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {details.labels.length > 0 ? (
-              details.labels.map((label) => (
-                <span
-                  key={label}
-                  className="rounded-md border border-silver-200 bg-white px-2 py-1 text-[12px] font-medium text-ink"
-                >
-                  {label}
-                </span>
-              ))
-            ) : (
-              <span className="text-[12px] font-medium text-silver-500">
-                인식된 객체 없음
-              </span>
-            )}
-          </div>
-          {details.imageUrl && (
-            <a
-              href={details.imageUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-azure-700 hover:text-azure-600"
-            >
-              결과 이미지 열기
-              <ChevronRight size={13} />
-            </a>
-          )}
-        </div>
-      )}
-      <div className="relative overflow-hidden rounded-[14px] panel-deep">
-        <div className="flex items-center justify-between border-b border-azure-200/10 px-3 py-2">
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full bg-alert/80" />
-            <span className="h-2 w-2 rounded-full bg-warn/80" />
-            <span className="h-2 w-2 rounded-full bg-signal/80" />
-          </div>
-          <div className="flex items-center gap-1.5">
-            {live && (
-              <span className="relative flex h-1.5 w-1.5">
-                <span className="absolute inset-0 animate-ping rounded-full bg-signal opacity-70" />
-                <span className="relative h-1.5 w-1.5 rounded-full bg-signal" />
-              </span>
-            )}
-            <span className="font-mono text-[9.5px] uppercase tracking-[0.24em] text-azure-200/70">
-              {live ? "연결됨" : "대기"}
-            </span>
-          </div>
-        </div>
-        <div className="grid-fine relative max-h-[260px] overflow-auto scroll-fade">
-          <pre className="relative whitespace-pre-wrap break-words p-4 font-mono text-[11.5px] leading-[1.65] text-azure-100/95">
-            {empty ? (
-              <span className="text-azure-200/40">
-                {"현재 장면을 읽으면 인식 결과가 여기에 표시됩니다."}
-              </span>
-            ) : (
-              text
-            )}
-          </pre>
-          {live && <div className="scan-line" />}
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function ErrorChip({ message }: { message: string }) {
-  return (
-    <div className="mt-3 flex items-start gap-2 rounded-[12px] border border-alert/30 bg-alert/8 px-3 py-2.5 text-[12.5px] font-medium text-alert-deep">
-      <CircleAlert className="mt-0.5 shrink-0" size={14} />
-      <span className="leading-snug">{message}</span>
-    </div>
-  );
-}
-
-/* ════════════════════════════════════════════════════════════ */
-/*  UTILS                                                       */
-/* ════════════════════════════════════════════════════════════ */
 
 async function apiGet<T>(url: string): Promise<{ data: T | null; error: string }> {
   try {
@@ -1667,12 +1391,6 @@ async function apiPost<T = unknown>(
   }
 }
 
-function formatData(value: unknown) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value, null, 2);
-}
-
 function createInitialAssistantMessage(): ChatMessage {
   return {
     id: crypto.randomUUID(),
@@ -1680,42 +1398,6 @@ function createInitialAssistantMessage(): ChatMessage {
     text: initialAssistantMessage.text,
     at: Date.now()
   };
-}
-
-function loadStoredMessages(): ChatMessage[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
-    if (!raw) return [createInitialAssistantMessage()];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [createInitialAssistantMessage()];
-    const messages = parsed
-      .filter((item) => item && (item.role === "assistant" || item.role === "user") && typeof item.text === "string")
-      .map((item) => ({
-        id: typeof item.id === "string" ? item.id : crypto.randomUUID(),
-        role: item.role,
-        text: item.text,
-        at: typeof item.at === "number" ? item.at : Date.now(),
-        attachments: Array.isArray(item.attachments) ? item.attachments : undefined
-      }))
-      .slice(-HISTORY_LIMIT);
-    return messages.length > 0 ? messages : [createInitialAssistantMessage()];
-  } catch {
-    return [createInitialAssistantMessage()];
-  }
-}
-
-function saveStoredMessages(messages: ChatMessage[]) {
-  const serializable = messages
-    .filter((message) => message.text.trim() || message.attachments?.length)
-    .map(({ id, role, text, at, attachments }) => ({
-      id,
-      role,
-      text,
-      at,
-      attachments
-    }))
-    .slice(-HISTORY_LIMIT);
-  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(serializable));
 }
 
 function buildConversationHistory(messages: ChatMessage[]) {
@@ -1773,14 +1455,67 @@ function getRecognitionDetails(value: unknown) {
   };
 }
 
-function fileToDataUrl(file: File): Promise<string | null> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () =>
-      resolve(typeof reader.result === "string" ? reader.result : null);
-    reader.onerror = () => resolve(null);
-    reader.readAsDataURL(file);
-  });
+function getFirstImageUrl(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const urls: string[] = [];
+  const visit = (item: unknown) => {
+    if (!item || typeof item !== "object" || urls.length > 0) return;
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+      return;
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.uri === "string") {
+      const mime = typeof record.mimeType === "string" ? record.mimeType : "";
+      if (!mime || mime.startsWith("image/")) {
+        urls.push(record.uri);
+        return;
+      }
+    }
+    Object.values(record).forEach(visit);
+  };
+  visit(value);
+  return urls[0] || "";
+}
+
+function getImageUrlWithCacheBust(url: string, tick: number) {
+  if (!url || !tick) return url;
+  if (/^(data|blob):/i.test(url)) return url;
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (parsed.protocol === "data:" || parsed.protocol === "blob:") return url;
+    parsed.searchParams.set("_frame", String(tick));
+    return parsed.toString();
+  } catch {
+    const joiner = url.includes("?") ? "&" : "?";
+    return `${url}${joiner}_frame=${tick}`;
+  }
+}
+
+function getScreenStatus(screenCapture: ApiState<ScreenPayload>) {
+  const base = "실시간 화면";
+  const durationMs = screenCapture.data?.durationMs;
+  const latency =
+    typeof durationMs === "number" && Number.isFinite(durationMs)
+      ? formatLatency(durationMs)
+      : "";
+  if (screenCapture.loading && !screenCapture.data) {
+    return { label: `${base} 준비 중`, latency, slow: false };
+  }
+  if (screenCapture.loading) {
+    return { label: `${base} 갱신 중`, latency, slow: false };
+  }
+  return {
+    label: latency ? `${base} · ${latency}` : base,
+    latency,
+    slow: typeof durationMs === "number" && durationMs >= 1300
+  };
+}
+
+function formatLatency(ms: number) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)}초`;
+  return `${Math.round(ms / 1000)}초`;
 }
 
 function formatTime(ts: number) {
@@ -1788,14 +1523,6 @@ function formatTime(ts: number) {
   const hh = String(date.getHours()).padStart(2, "0");
   const mm = String(date.getMinutes()).padStart(2, "0");
   return `${hh}:${mm}`;
-}
-
-function formatRelative(iso: string) {
-  const then = new Date(iso).getTime();
-  const diff = Math.max(0, Date.now() - then);
-  if (diff < 60_000) return "방금 전";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}분 전`;
-  return `${Math.floor(diff / 3_600_000)}시간 전`;
 }
 
 function hostFromUrl(url: string) {
@@ -1806,8 +1533,32 @@ function hostFromUrl(url: string) {
   }
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+function normalizeHuskyLensUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+
+  const withProtocol = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : `http://${trimmed}`;
+
+  try {
+    const url = new URL(withProtocol);
+    if (!url.port) url.port = "3000";
+    if (url.pathname === "/" || url.pathname === "") url.pathname = "/sse";
+    return url.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+declare global {
+  interface Window {
+    __huskylensRoot?: ReturnType<typeof createRoot>;
+  }
+}
+
+const rootElement = document.getElementById("root")!;
+const root = window.__huskylensRoot ?? createRoot(rootElement);
+window.__huskylensRoot = root;
+
+root.render(<App />);
