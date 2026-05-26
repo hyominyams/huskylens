@@ -508,7 +508,7 @@ function App() {
         />
 
         <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_390px] xl:grid-cols-[minmax(0,1fr)_430px]">
-          <section className="reveal relative min-h-[520px] overflow-hidden rounded-[8px] panel-deep lg:h-[calc(100vh-102px)]">
+          <section className="reveal relative h-[50vh] min-h-[300px] overflow-hidden rounded-[8px] panel-deep lg:h-[calc(100vh-102px)]">
             <VisionStage
               context={liveContext}
               frameTick={screenFrameTick}
@@ -542,7 +542,7 @@ function App() {
             )}
           </section>
 
-          <section className="reveal flex min-h-[620px] flex-col overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
+          <section className="reveal flex h-[58vh] min-h-[440px] flex-col overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
             <SceneStrip
               state={sceneState}
               connectedAt={connection.data?.connectedAt}
@@ -673,7 +673,7 @@ function VisionStage({
   }
 
   return (
-    <div className="flex h-full min-h-[520px] flex-col">
+    <div className="flex h-full min-h-[300px] flex-col">
       <div className="flex min-h-0 flex-1 items-center justify-center bg-[#07111f]">
         <div className="relative flex h-full w-full items-center justify-center">
           {imageUrl && !imageLoadFailed ? (
@@ -1055,7 +1055,6 @@ function SceneStrip({
               {cfg.label}
             </span>
           </span>
-          <p className="hidden min-w-0 truncate text-[13px] text-silver-700 sm:block">{cfg.hint}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2 text-silver-500">
           {connectedAt && (
@@ -1077,11 +1076,12 @@ function SceneStrip({
           )}
         </div>
       </div>
+      <p className="mt-2 text-[13px] leading-snug text-silver-700">{cfg.hint}</p>
     </div>
   );
 }
 
-function ChatBubble({ message, index }: { message: ChatMessage; index: number }) {
+const ChatBubble = React.memo(function ChatBubble({ message, index }: { message: ChatMessage; index: number }) {
   const isUser = message.role === "user";
   const streaming = !isUser && typeof message.displayLen === "number";
   const visibleText = streaming
@@ -1129,7 +1129,10 @@ function ChatBubble({ message, index }: { message: ChatMessage; index: number })
                 <p className="whitespace-pre-wrap">{visibleText}</p>
               ) : (
                 <div className="markdown-body">
-                  <MarkdownMessage text={visibleText} isUser={false} />
+                  <MarkdownMessage
+                    text={streaming ? closeOpenMarkdown(visibleText) : visibleText}
+                    isUser={false}
+                  />
                   {streaming && <TypingCursor />}
                 </div>
               )}
@@ -1139,7 +1142,7 @@ function ChatBubble({ message, index }: { message: ChatMessage; index: number })
       </div>
     </div>
   );
-}
+});
 
 function TypingCursor() {
   return (
@@ -1205,6 +1208,15 @@ function MarkdownMessage({ text, isUser }: { text: string; isUser: boolean }) {
       {text}
     </ReactMarkdown>
   );
+}
+
+function closeOpenMarkdown(text: string) {
+  let result = text;
+  // Close a dangling inline code span so a half-typed `code does not show a raw backtick.
+  if ((result.match(/`/g) || []).length % 2 === 1) result += "`";
+  // Close a dangling bold span so a half-typed **word renders as bold instead of raw **.
+  if ((result.match(/\*\*/g) || []).length % 2 === 1) result += "**";
+  return result;
 }
 
 function ThinkingBubble() {
