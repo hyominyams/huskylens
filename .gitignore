@@ -8,6 +8,7 @@ dist/
 *.log
 .playwright-cli/
 output/
+data/
 release/.cache/
 release/windows-student/
 release/*.zip
