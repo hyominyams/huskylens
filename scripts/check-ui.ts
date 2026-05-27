@@ -115,22 +115,22 @@ const requiredChecks: RequiredCheck[] = [
     message: "AI 답변은 Markdown으로 렌더링되어야 합니다."
   },
   {
-    label: "Screen endpoint",
+    label: "RTSP stream proxy",
     file: "src/web/main.tsx",
-    value: "/api/huskylens/screen",
-    message: "큰 화면은 서버의 화면 엔드포인트를 통해 갱신되어야 합니다."
+    value: "getHuskyLensRtspProxyUrl",
+    message: "큰 화면은 로컬 백엔드를 거친 HUSKYLENS RTSP 영상을 사용해야 합니다."
   },
   {
-    label: "Answer keeps MCP responsive",
+    label: "Answer preserves RTSP stream",
     file: "src/web/main.tsx",
-    value: "if (!url || !screenPolling || answer.loading) return;",
-    message: "AI 답변 중에는 화면 갱신 요청이 MCP 큐를 계속 차지하지 않아야 합니다."
+    value: "includeScreen: false",
+    message: "일반 AI 답변은 영상을 멈출 수 있는 MCP 화면 캡처를 요청하지 않아야 합니다."
   },
   {
-    label: "Answer screen hold status",
+    label: "Answer RTSP status",
     file: "src/web/main.tsx",
-    value: "답변 중 · 화면 유지",
-    message: "AI 답변 중 화면이 유지된다는 상태를 학생 화면에서 알 수 있어야 합니다."
+    value: "RTSP 영상",
+    message: "RTSP 영상 상태를 학생 화면에서 알 수 있어야 합니다."
   },
   {
     label: "Ignore late screen refresh while answering",

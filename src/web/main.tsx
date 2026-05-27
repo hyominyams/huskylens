@@ -1,12 +1,15 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
   Aperture,
+  Camera,
   Check,
   CircleAlert,
   Eye,
+  FolderOpen,
   Loader2,
+  MessageSquare,
   Monitor,
   Pause,
   Play,
@@ -55,10 +58,27 @@ type ChatMessage = {
 type ScreenPayload = {
   resources?: Array<Record<string, unknown>>;
   detections?: Array<Record<string, unknown>>;
-  captureMode?: "screenshot";
+  captureMode?: "screenshot" | "photo";
   durationMs?: number;
   raw?: unknown;
   values?: unknown[];
+};
+
+type AppMode = "select" | "stream" | "chat";
+
+type StreamCapture = {
+  id: string;
+  timestamp: string;
+  deviceHost: string;
+  cameraName?: string;
+  displayName?: string;
+  path: string;
+  fileName: string;
+  absolutePath?: string;
+  metadata?: {
+    source?: string;
+    durationMs?: number;
+  };
 };
 
 const initialAssistantMessage = {
@@ -67,9 +87,13 @@ const initialAssistantMessage = {
 };
 
 const defaultMcpUrl = localStorage.getItem("huskylens:mcpUrl") || "";
+const defaultStreamUrl = localStorage.getItem("huskylens:streamUrl") || "";
+const defaultCameraName = localStorage.getItem("huskylens:cameraName") || "";
 
 function App() {
+  const [appMode, setAppMode] = useState<AppMode>("select");
   const [mcpUrl, setMcpUrl] = useState(defaultMcpUrl);
+  const [cameraName, setCameraName] = useState(defaultCameraName);
   const [openaiApiKey, setOpenaiApiKey] = useState(
     localStorage.getItem("huskylens:openaiApiKey") || ""
   );
@@ -108,6 +132,16 @@ function App() {
   const [answer, setAnswer] = useState<
     ApiState<{ answer: string; visionContext: unknown; screenContext?: unknown }>
   >({ loading: false, error: "", data: null });
+  const [captureHistory, setCaptureHistory] = useState<ApiState<StreamCapture[]>>({
+    loading: false,
+    error: "",
+    data: []
+  });
+  const [captureAction, setCaptureAction] = useState<ApiState<StreamCapture>>({
+    loading: false,
+    error: "",
+    data: null
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeScreenRequestRef = useRef<number | null>(null);
@@ -127,6 +161,11 @@ function App() {
     if (openaiApiKey) localStorage.setItem("huskylens:openaiApiKey", openaiApiKey);
     else localStorage.removeItem("huskylens:openaiApiKey");
   }, [openaiApiKey]);
+
+  useEffect(() => {
+    if (cameraName.trim()) localStorage.setItem("huskylens:cameraName", cameraName.trim());
+    else localStorage.removeItem("huskylens:cameraName");
+  }, [cameraName]);
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -179,15 +218,35 @@ function App() {
   }, [needsApiKey]);
 
   useEffect(() => {
+    if (appMode === "select") return;
+    if (appMode === "stream") {
+      const storedUrl = (
+        localStorage.getItem("huskylens:streamUrl") ||
+        localStorage.getItem("huskylens:mcpUrl") ||
+        defaultStreamUrl ||
+        defaultMcpUrl
+      ).trim();
+      if (storedUrl) {
+        setMcpUrl(normalizeHuskyLensUrl(storedUrl, "stream"));
+        setScreenPolling(true);
+        setScreenFrameTick(Date.now());
+      }
+      return;
+    }
     if (initialDiscoveryRef.current) return;
     initialDiscoveryRef.current = true;
-    const storedUrl = defaultMcpUrl.trim();
+    const storedUrl = (
+      localStorage.getItem("huskylens:mcpUrl") ||
+      localStorage.getItem("huskylens:streamUrl") ||
+      defaultMcpUrl ||
+      defaultStreamUrl
+    ).trim();
     if (!storedUrl) {
       void discover();
       return;
     }
 
-    const normalizedStoredUrl = normalizeHuskyLensUrl(storedUrl);
+    const normalizedStoredUrl = normalizeHuskyLensUrl(storedUrl, "chat");
     void (async () => {
       let fallbackStarted = false;
       const fallbackTimer = window.setTimeout(() => {
@@ -207,32 +266,26 @@ function App() {
         }
       }
     })();
-  }, []);
+  }, [appMode]);
 
   useEffect(() => {
-    const url = connectedToCurrentUrl ? connection.data?.url : "";
-    if (!url || !screenPolling || answer.loading) return;
-    let stopped = false;
-    let timer: number | undefined;
+    if (!connectedToCurrentUrl || !screenPolling) return;
+    setScreenCapture((current) => ({ ...current, error: "" }));
+  }, [connectedToCurrentUrl, screenPolling]);
 
-    const tick = async () => {
-      if (stopped) return;
-      await refreshScreen(url, true);
-      if (!stopped) {
-        timer = window.setTimeout(tick, screenDelayRef.current);
+  useEffect(() => {
+    if (appMode === "stream") {
+      void loadCaptureHistory();
+      if (connectedToCurrentUrl) {
+        setScreenPolling(true);
+        setScreenFrameTick(Date.now());
       }
-    };
+      return;
+    }
+    setScreenPolling(false);
+  }, [appMode, connectedToCurrentUrl]);
 
-    void tick();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [answer.loading, connectedToCurrentUrl, connection.data?.url, screenPolling]);
-
-  const liveContext = connectedToCurrentUrl
-    ? screenCapture.data ?? latestVisionContext ?? recognition.data
-    : null;
+  const liveContext = connectedToCurrentUrl ? latestVisionContext ?? recognition.data : null;
   const sceneState: "live" | "ready" | "idle" = connection.data
     ? connectedToCurrentUrl
       ? liveContext
@@ -249,7 +302,7 @@ function App() {
   }
 
   async function connect(url = mcpUrl) {
-    const nextUrl = normalizeHuskyLensUrl(url);
+    const nextUrl = normalizeHuskyLensUrl(url, "chat");
     if (!nextUrl) return false;
     discoveryRequestRef.current += 1;
     const previousUrl = connection.data?.url;
@@ -273,8 +326,8 @@ function App() {
       }
       localStorage.setItem("huskylens:mcpUrl", result.data.url);
       screenFailureCountRef.current = 0;
-      setScreenPolling(true);
-      void refreshScreen(result.data.url, false, true);
+      setScreenPolling(appMode === "stream");
+      if (appMode === "stream") setScreenFrameTick(Date.now());
       return true;
     }
     return false;
@@ -284,7 +337,7 @@ function App() {
     setMcpUrl(value);
     connectRequestRef.current += 1;
     discoveryRequestRef.current += 1;
-    const normalized = normalizeHuskyLensUrl(value);
+    const normalized = normalizeHuskyLensUrl(value, appMode === "stream" ? "stream" : "chat");
     setConnection((current) => ({
       ...current,
       loading: false,
@@ -332,7 +385,7 @@ function App() {
   }
 
   function normalizeMcpUrlInput() {
-    const normalized = normalizeHuskyLensUrl(mcpUrl);
+    const normalized = normalizeHuskyLensUrl(mcpUrl, appMode === "stream" ? "stream" : "chat");
     if (normalized && normalized !== mcpUrl) changeMcpUrl(normalized);
   }
 
@@ -343,6 +396,14 @@ function App() {
     const result = await apiGet<string[]>("/api/huskylens/discover");
     if (discoveryRequestRef.current !== requestId) return;
     setDiscovery({ loading: false, error: result.error, data: result.data });
+    if (appMode === "stream") {
+      if (result.data?.[0]) {
+        setMcpUrl(normalizeHuskyLensUrl(result.data[0], "stream"));
+        setScreenPolling(true);
+        setScreenFrameTick(Date.now());
+      }
+      return;
+    }
     if (result.data?.length === 1) {
       await connect(result.data[0]);
       return;
@@ -432,9 +493,9 @@ function App() {
       {
         huskylensUrl,
         openaiApiKey,
-        includeScreen: !screenCapture.data,
+        includeScreen: false,
         visionContext: latestVisionContext ?? recognition.data,
-        screenContext: screenCapture.data,
+        screenContext: null,
         question: trimmed,
         history: buildConversationHistory(messages)
       }
@@ -477,8 +538,75 @@ function App() {
     ]);
   }
 
+  function chooseMode(mode: Exclude<AppMode, "select">) {
+    setAppMode(mode);
+    if (mode === "stream") {
+      void loadCaptureHistory();
+      const storedUrl = localStorage.getItem("huskylens:streamUrl") || mcpUrl;
+      const normalized = normalizeHuskyLensUrl(storedUrl, "stream");
+      if (normalized) setMcpUrl(normalized);
+      setScreenPolling(Boolean(connectedToCurrentUrl));
+      setScreenFrameTick(Date.now());
+      return;
+    }
+    const storedUrl = localStorage.getItem("huskylens:mcpUrl") || mcpUrl;
+    const normalized = normalizeHuskyLensUrl(storedUrl, "chat");
+    if (normalized) setMcpUrl(normalized);
+    setScreenPolling(false);
+  }
+
+  function startStreamFromAddress(url = mcpUrl) {
+    const normalized = normalizeHuskyLensUrl(url, "stream");
+    if (!normalized) return;
+    setMcpUrl(normalized);
+    localStorage.setItem("huskylens:streamUrl", normalized);
+    setScreenPolling(true);
+    setScreenFrameTick(Date.now());
+  }
+
+  async function loadCaptureHistory() {
+    setCaptureHistory((current) => ({ ...current, loading: true, error: "" }));
+    const result = await apiGet<StreamCapture[]>("/api/stream/captures");
+    setCaptureHistory({
+      loading: false,
+      error: result.error,
+      data: result.data ?? []
+    });
+  }
+
+  async function captureStreamFrame() {
+    const url = connectedToCurrentUrl ? connection.data?.url : normalizeHuskyLensUrl(mcpUrl, "stream");
+    if (!url) {
+      setCaptureAction({ loading: false, error: "HUSKYLENS 주소가 필요합니다.", data: null });
+      return;
+    }
+    setCaptureAction({ loading: true, error: "", data: null });
+    const result = await apiPost<StreamCapture>("/api/stream/capture", {
+      url,
+      cameraName: cameraName.trim()
+    });
+    if (result.data) {
+      setCaptureAction({ loading: false, error: "", data: result.data });
+      setCaptureHistory((current) => ({
+        loading: false,
+        error: "",
+        data: [result.data!, ...(current.data ?? [])].slice(0, 300)
+      }));
+      return;
+    }
+    setCaptureAction({ loading: false, error: result.error, data: null });
+  }
+
+  async function openCaptureFolder() {
+    const result = await apiPost<{ path: string }>("/api/stream/open-folder", {});
+    if (result.error) {
+      setCaptureHistory((current) => ({ ...current, error: result.error }));
+    }
+  }
+
   function onComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
+      if (event.nativeEvent.isComposing) return;
       event.preventDefault();
       if (canAsk && !answer.loading) void ask();
     }
@@ -504,88 +632,314 @@ function App() {
         <AppHeader
           connectedToCurrentUrl={connectedToCurrentUrl}
           showSettings={showSettings}
+          mode={appMode}
+          onBackToModes={() => setAppMode("select")}
           onToggleSettings={() => setShowSettings((v) => !v)}
         />
 
-        <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_390px] xl:grid-cols-[minmax(0,1fr)_430px]">
-          <section className="reveal relative h-[50vh] min-h-[300px] overflow-hidden rounded-[8px] panel-deep lg:h-[calc(100vh-102px)]">
-            <VisionStage
-              context={liveContext}
-              frameTick={screenFrameTick}
-              connection={connection}
-              connectedToCurrentUrl={connectedToCurrentUrl}
-              discovery={discovery}
-              recognition={recognition}
-              screenCapture={screenCapture}
-              answerLoading={answer.loading}
-              mcpUrl={mcpUrl}
-              screenPolling={screenPolling}
-              onChangeUrl={changeMcpUrl}
-              onNormalizeUrl={normalizeMcpUrlInput}
-              onDiscover={discover}
-              onConnect={() => void connect()}
-              onConnectUrl={(url) => void connect(url)}
-              onRefresh={() => void refreshScreen(undefined, false, true)}
-              onTogglePolling={() => {
-                if (!connectedToCurrentUrl || !connection.data) return;
-                const next = !screenPolling;
-                setScreenPolling(next);
-                if (next) void refreshScreen(connection.data.url);
-              }}
-            />
-            {showSettings && (
-              <CompactSettings
-                hasServerApiKey={hasServerApiKey}
-                openaiApiKey={openaiApiKey}
-                onChangeApiKey={setOpenaiApiKey}
+        {appMode === "select" ? (
+          <ModeSelect
+            onChooseStream={() => chooseMode("stream")}
+            onChooseChat={() => chooseMode("chat")}
+          />
+        ) : appMode === "stream" ? (
+          <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_330px] xl:grid-cols-[minmax(0,1fr)_360px]">
+            <section className="reveal relative min-h-[520px] overflow-hidden rounded-[8px] panel-deep lg:h-[calc(100vh-102px)]">
+              <VisionStage
+                mode="stream"
+                context={null}
+                frameTick={screenFrameTick}
+                connection={connection}
+                connectedToCurrentUrl={connectedToCurrentUrl}
+                discovery={discovery}
+                recognition={recognition}
+                screenCapture={screenCapture}
+                answerLoading={false}
+                mcpUrl={mcpUrl}
+                screenPolling={screenPolling}
+                captureLoading={captureAction.loading}
+                cameraName={cameraName}
+                onCapture={() => void captureStreamFrame()}
+                onChangeCameraName={setCameraName}
+                onChangeUrl={changeMcpUrl}
+                onNormalizeUrl={normalizeMcpUrlInput}
+                onDiscover={discover}
+                onConnect={() => startStreamFromAddress()}
+                onConnectUrl={(url) => startStreamFromAddress(url)}
+                onRefresh={() => {
+                  setScreenCapture((current) => ({ ...current, error: "" }));
+                  setScreenFrameTick(Date.now());
+                }}
+                onTogglePolling={() => {
+                  if (!normalizeHuskyLensUrl(mcpUrl, "stream")) return;
+                  const next = !screenPolling;
+                  setScreenPolling(next);
+                  if (next) setScreenFrameTick(Date.now());
+                }}
               />
-            )}
-          </section>
-
-          <section className="reveal flex h-[58vh] min-h-[440px] flex-col overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
-            <SceneStrip
-              state={sceneState}
-              connectedAt={connection.data?.connectedAt}
-              canClearConversation={canClearConversation}
-              onClearConversation={clearConversation}
-            />
-
-            <div
-              ref={scrollRef}
-              className="scroll-fade relative min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-7 sm:px-8"
-            >
-              {messages.map((message, index) => (
-                <ChatBubble
-                  key={message.id}
-                  message={message}
-                  index={index}
+              {showSettings && (
+                <CompactSettings
+                  hasServerApiKey={hasServerApiKey}
+                  openaiApiKey={openaiApiKey}
+                  onChangeApiKey={setOpenaiApiKey}
                 />
-              ))}
-              {answer.loading && <ThinkingBubble />}
-            </div>
-
-            <div className="border-t border-silver-200 bg-[#f6f8fb] px-4 pb-4 pt-4 sm:px-6 sm:pb-5 sm:pt-5">
-              {answer.error && <ErrorBanner message={answer.error} />}
-              <Composer
-                ref={composerRef}
-                value={question}
-                onChange={setQuestion}
-                onKeyDown={onComposerKeyDown}
-                onSubmit={ask}
-                disabled={!canAsk || answer.loading}
-                loading={answer.loading}
-                sceneState={sceneState}
-                needsApiKey={needsApiKey}
+              )}
+            </section>
+            <aside className="reveal min-h-[420px] overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
+              <CaptureHistoryPanel
+                captures={captureHistory.data ?? []}
+                loading={captureHistory.loading}
+                actionLoading={captureAction.loading}
+                error={captureAction.error || captureHistory.error}
+                cameraName={cameraName}
+                onCapture={() => void captureStreamFrame()}
+                onOpenFolder={() => void openCaptureFolder()}
+                onRefresh={() => void loadCaptureHistory()}
               />
-            </div>
-          </section>
-        </div>
+            </aside>
+          </div>
+        ) : (
+          <div className="mt-3 grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(320px,360px)] xl:grid-cols-[minmax(0,1fr)_380px]">
+            <section className="reveal order-1 relative h-[50vh] min-h-[300px] overflow-hidden rounded-[8px] panel-deep lg:order-2 lg:h-[calc(100vh-102px)]">
+              <VisionStage
+                mode="chat"
+                context={liveContext}
+                frameTick={screenFrameTick}
+                connection={connection}
+                connectedToCurrentUrl={connectedToCurrentUrl}
+                discovery={discovery}
+                recognition={recognition}
+                screenCapture={screenCapture}
+                answerLoading={answer.loading}
+                mcpUrl={mcpUrl}
+                screenPolling={screenPolling}
+                onChangeUrl={changeMcpUrl}
+                onNormalizeUrl={normalizeMcpUrlInput}
+                onDiscover={discover}
+                onConnect={() => void connect()}
+                onConnectUrl={(url) => void connect(url)}
+                onRefresh={() => {
+                  setScreenCapture((current) => ({ ...current, error: "" }));
+                  setScreenFrameTick(Date.now());
+                }}
+                onTogglePolling={() => {
+                  if (!connectedToCurrentUrl || !connection.data) return;
+                  const next = !screenPolling;
+                  setScreenPolling(next);
+                  if (next) setScreenFrameTick(Date.now());
+                }}
+              />
+              {showSettings && (
+                <CompactSettings
+                  hasServerApiKey={hasServerApiKey}
+                  openaiApiKey={openaiApiKey}
+                  onChangeApiKey={setOpenaiApiKey}
+                />
+              )}
+            </section>
+
+            <section className="reveal order-2 flex h-[58vh] min-h-[440px] flex-col overflow-hidden rounded-[8px] panel-light lg:order-1 lg:h-[calc(100vh-102px)]">
+              <SceneStrip
+                state={sceneState}
+                connectedAt={connection.data?.connectedAt}
+                canClearConversation={canClearConversation}
+                onClearConversation={clearConversation}
+              />
+
+              <div
+                ref={scrollRef}
+                className="scroll-fade relative min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-7 sm:px-8"
+              >
+                {messages.map((message, index) => (
+                  <ChatBubble
+                    key={message.id}
+                    message={message}
+                    index={index}
+                  />
+                ))}
+                {answer.loading && <ThinkingBubble />}
+              </div>
+
+              <div className="border-t border-silver-200 bg-[#f6f8fb] px-4 pb-4 pt-4 sm:px-6 sm:pb-5 sm:pt-5">
+                {answer.error && <ErrorBanner message={answer.error} />}
+                <Composer
+                  ref={composerRef}
+                  value={question}
+                  onChange={setQuestion}
+                  onKeyDown={onComposerKeyDown}
+                  onSubmit={ask}
+                  disabled={!canAsk || answer.loading}
+                  loading={answer.loading}
+                  sceneState={sceneState}
+                  needsApiKey={needsApiKey}
+                />
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     </main>
   );
 }
 
+function ModeSelect({
+  onChooseStream,
+  onChooseChat
+}: {
+  onChooseStream: () => void;
+  onChooseChat: () => void;
+}) {
+  return (
+    <section className="reveal mt-3 flex flex-1 items-center justify-center rounded-[8px] border border-silver-200 bg-[#f7f9fc] p-5 shadow-crisp">
+      <div className="grid w-full max-w-[960px] gap-4 md:grid-cols-2">
+        <button
+          type="button"
+          onClick={onChooseStream}
+          className="group flex min-h-[260px] flex-col justify-between rounded-[8px] border border-silver-200 bg-white p-6 text-left shadow-soft transition hover:-translate-y-0.5 hover:border-azure-300 hover:shadow-elevated"
+        >
+          <div>
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-[8px] bg-ink text-azure-100">
+              <Monitor size={24} strokeWidth={1.55} />
+            </div>
+            <h2 className="text-[26px] font-semibold tracking-[-0.015em] text-ink">
+              스트리밍 모드
+            </h2>
+            <p className="mt-3 text-[15px] leading-[1.7] text-silver-700">
+              실시간 영상을 보고 필요한 순간을 로컬에 저장합니다.
+            </p>
+          </div>
+          <div className="mt-6 flex items-center justify-between border-t border-silver-100 pt-4 text-[13px] font-semibold text-azure-700">
+            <span>RTSP 영상</span>
+            <Camera size={17} className="transition group-hover:scale-105" />
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={onChooseChat}
+          className="group flex min-h-[260px] flex-col justify-between rounded-[8px] border border-silver-200 bg-white p-6 text-left shadow-soft transition hover:-translate-y-0.5 hover:border-azure-300 hover:shadow-elevated"
+        >
+          <div>
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-[8px] bg-ink text-azure-100">
+              <MessageSquare size={24} strokeWidth={1.55} />
+            </div>
+            <h2 className="text-[26px] font-semibold tracking-[-0.015em] text-ink">
+              대화모드
+            </h2>
+            <p className="mt-3 text-[15px] leading-[1.7] text-silver-700">
+              영상 송출 없이 MCP 데이터와 장치 기능으로 AI와 대화합니다.
+            </p>
+          </div>
+          <div className="mt-6 flex items-center justify-between border-t border-silver-100 pt-4 text-[13px] font-semibold text-azure-700">
+            <span>MCP 대화</span>
+            <Aperture size={17} className="transition group-hover:scale-105" />
+          </div>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function CaptureHistoryPanel({
+  captures,
+  loading,
+  actionLoading,
+  error,
+  cameraName,
+  onCapture,
+  onOpenFolder,
+  onRefresh
+}: {
+  captures: StreamCapture[];
+  loading: boolean;
+  actionLoading: boolean;
+  error: string;
+  cameraName: string;
+  onCapture: () => void;
+  onOpenFolder: () => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="flex h-full min-h-0 flex-col bg-[#f7f9fc] p-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-[15px] font-semibold text-ink">캡처 이력</h2>
+          <p className="mt-1 text-[12.5px] text-silver-600">
+            {cameraName.trim() || "저장된 화면과 시간을 확인합니다"}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onCapture}
+            disabled={actionLoading}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-[6px] bg-ink px-3.5 text-[13px] font-semibold text-white transition hover:bg-char disabled:cursor-not-allowed disabled:bg-silver-300 disabled:text-silver-500"
+          >
+            {actionLoading ? <Loader2 className="animate-spin" size={14} /> : <Camera size={14} />}
+            캡처
+          </button>
+          <button
+            type="button"
+            onClick={onOpenFolder}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-[6px] border border-silver-200 bg-white px-3.5 text-[13px] font-semibold text-ink transition hover:bg-silver-50"
+          >
+            <FolderOpen size={14} />
+            폴더 열기
+          </button>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={loading}
+            aria-label="캡처 이력 새로고침"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-[6px] border border-silver-200 bg-white text-ink transition hover:bg-silver-50 disabled:opacity-50"
+          >
+            {loading ? <Loader2 className="animate-spin" size={14} /> : <RefreshCcw size={14} />}
+          </button>
+        </div>
+      </div>
+
+      {error && <ErrorBanner message={error} />}
+
+      {captures.length === 0 ? (
+        <div className="flex min-h-[160px] flex-1 items-center justify-center rounded-[8px] border border-dashed border-silver-300 bg-white px-4 text-center text-[13px] font-medium text-silver-500">
+          저장된 캡처가 없습니다
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          {captures.map((capture) => (
+            <a
+              key={capture.id}
+              href={capture.path}
+              target="_blank"
+              rel="noreferrer"
+              className="group block overflow-hidden rounded-[8px] border border-silver-200 bg-white shadow-soft transition hover:border-azure-300"
+            >
+              <div className="aspect-video bg-[#07111f]">
+                <img
+                  src={capture.path}
+                  alt="캡처 화면"
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              </div>
+              <div className="px-3 py-2">
+                <p className="truncate text-[12px] font-semibold text-ink">
+                  {capture.displayName || capture.cameraName || capture.deviceHost}
+                </p>
+                <p className="mt-0.5 text-[11px] text-silver-500">
+                  {formatDateTime(capture.timestamp)}
+                </p>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function VisionStage({
+  mode,
   context,
   frameTick,
   connection,
@@ -593,9 +947,12 @@ function VisionStage({
   discovery,
   recognition,
   screenCapture,
-  answerLoading,
+  captureLoading = false,
   mcpUrl,
   screenPolling,
+  onCapture,
+  cameraName = "",
+  onChangeCameraName,
   onChangeUrl,
   onNormalizeUrl,
   onDiscover,
@@ -604,6 +961,7 @@ function VisionStage({
   onRefresh,
   onTogglePolling
 }: {
+  mode: "stream" | "chat";
   context: unknown;
   frameTick: number;
   connection: ApiState<ConnectionData>;
@@ -612,8 +970,12 @@ function VisionStage({
   recognition: ApiState;
   screenCapture: ApiState<ScreenPayload>;
   answerLoading: boolean;
+  captureLoading?: boolean;
   mcpUrl: string;
   screenPolling: boolean;
+  onCapture?: () => void;
+  cameraName?: string;
+  onChangeCameraName?: (value: string) => void;
   onChangeUrl: (value: string) => void;
   onNormalizeUrl: () => void;
   onDiscover: () => void;
@@ -622,21 +984,28 @@ function VisionStage({
   onRefresh: () => void;
   onTogglePolling: () => void;
 }) {
-  const connected = connectedToCurrentUrl;
+  const normalizedStreamUrl = normalizeHuskyLensUrl(mcpUrl, mode === "stream" ? "stream" : "chat");
+  const streamSourceUrl = connectedToCurrentUrl && connection.data ? connection.data.url : normalizedStreamUrl;
+  const connected = mode === "stream" ? Boolean(streamSourceUrl) : connectedToCurrentUrl;
   const [editingAddress, setEditingAddress] = useState(false);
-  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  const [editingCameraName, setEditingCameraName] = useState(false);
+  const [streamLoadFailed, setStreamLoadFailed] = useState(false);
   const addressInputRef = useRef<HTMLInputElement>(null);
-  const imageUrl = getImageUrlWithCacheBust(getFirstImageUrl(context), frameTick);
+  const cameraNameInputRef = useRef<HTMLInputElement>(null);
+  const streamHost = streamSourceUrl ? hostNameFromUrl(streamSourceUrl) : "";
+  const streamPageUrl = mode === "stream" && streamSourceUrl && screenPolling
+    ? getHuskyLensRtspProxyUrl(streamSourceUrl, frameTick)
+    : "";
   const details = getRecognitionDetails(context);
-  const screenStatus = answerLoading && screenPolling
-    ? { label: "답변 중 · 화면 유지", latency: "", slow: false }
+  const screenStatus = screenPolling
+    ? { label: "RTSP 영상", latency: "", slow: false }
     : getScreenStatus(screenCapture);
-  const refreshLabel = "화면 새로고침";
+  const refreshLabel = "영상 다시 연결";
   const error = connection.error || discovery.error || recognition.error || screenCapture.error;
   const foundCount = discovery.data?.length ?? 0;
-  const selectedFoundUrl = Boolean(discovery.data?.includes(mcpUrl));
+  const selectedFoundUrl = Boolean(discovery.data?.some((url) => sameHuskyLensHost(url, mcpUrl)));
   const helperText = connected
-    ? hostFromUrl(connection.data!.url)
+    ? hostFromUrl(mode === "stream" ? streamSourceUrl : connection.data!.url)
     : discovery.loading
       ? "같은 Wi-Fi에서 허스키렌즈를 찾고 있습니다"
       : foundCount > 0
@@ -647,14 +1016,17 @@ function VisionStage({
             ? "주소를 확인한 뒤 연결을 누르세요"
             : "IP만 입력해도 주소가 자동으로 맞춰집니다";
   const showAddressEditor = !connected || editingAddress;
+  const handleStreamError = useCallback(() => {
+    setStreamLoadFailed(true);
+  }, []);
 
   useEffect(() => {
     setEditingAddress(false);
   }, [connected]);
 
   useEffect(() => {
-    setImageLoadFailed(false);
-  }, [imageUrl]);
+    setStreamLoadFailed(false);
+  }, [frameTick, streamHost]);
 
   useEffect(() => {
     if (!editingAddress || !showAddressEditor || connection.loading) return;
@@ -664,6 +1036,15 @@ function VisionStage({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [connection.loading, editingAddress, showAddressEditor]);
+
+  useEffect(() => {
+    if (!editingCameraName) return;
+    const timer = window.setTimeout(() => {
+      cameraNameInputRef.current?.focus();
+      cameraNameInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [editingCameraName]);
 
   function onAddressKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key !== "Enter") return;
@@ -676,12 +1057,10 @@ function VisionStage({
     <div className="flex h-full min-h-[300px] flex-col">
       <div className="flex min-h-0 flex-1 items-center justify-center bg-[#07111f]">
         <div className="relative flex h-full w-full items-center justify-center">
-          {imageUrl && !imageLoadFailed ? (
-            <img
-              src={imageUrl}
-              alt="허스키렌즈 카메라 화면"
-              onError={() => setImageLoadFailed(true)}
-              className="h-full w-full object-contain"
+          {mode === "stream" && streamPageUrl && !streamLoadFailed ? (
+            <RtspStreamFrame
+              src={streamPageUrl}
+              onError={handleStreamError}
             />
           ) : (
             <div className="flex max-w-[520px] flex-col items-center justify-center px-6 text-center text-azure-100/80">
@@ -689,14 +1068,27 @@ function VisionStage({
                 <Monitor size={30} strokeWidth={1.45} />
               </div>
               <h2 className="text-[26px] font-semibold tracking-[-0.018em] text-white">
-                허스키렌즈 화면
+                {mode === "stream" ? "허스키렌즈 화면" : "대화모드"}
               </h2>
               <p className="mt-2 text-[14px] leading-[1.7] text-azure-100/65">
-                {imageLoadFailed
-                  ? "화면 이미지를 다시 불러오고 있습니다. 새로고침을 한 번 눌러 주세요."
-                  : "같은 Wi-Fi에서 허스키렌즈 주소로 연결하면 카메라 화면이 크게 표시됩니다."}
+                {mode === "chat"
+                  ? "영상 없이 인식 데이터와 장치 기능을 사용합니다."
+                  : streamLoadFailed
+                  ? "영상을 다시 연결해 주세요."
+                  : connected
+                    ? "RTSP 영상 보기를 켜면 실시간 화면이 열립니다."
+                    : "같은 Wi-Fi에서 허스키렌즈 주소로 연결하면 카메라 화면이 크게 표시됩니다."}
               </p>
-              {!imageLoadFailed && <ConnectionChecklist />}
+              {!connected && <ConnectionChecklist />}
+              <ConnectionActions
+                connected={connected}
+                connectionLoading={connection.loading}
+                discoveryLoading={discovery.loading}
+                screenLoading={screenCapture.loading}
+                onRefresh={onRefresh}
+                onDiscover={onDiscover}
+                onEditAddress={() => setEditingAddress(true)}
+              />
             </div>
           )}
 
@@ -711,7 +1103,7 @@ function VisionStage({
               {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
               {connected ? "연결됨" : "연결 전"}
             </span>
-            {screenPolling && (
+            {mode === "stream" && screenPolling && (
               <span
                 className={`inline-flex h-8 items-center gap-2 rounded-[6px] border px-2.5 text-[12px] font-semibold ${
                   screenStatus.slow
@@ -725,8 +1117,27 @@ function VisionStage({
             )}
           </div>
 
-          {connected && (
+          {mode === "stream" && connected && (
             <div className="absolute right-4 top-4 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onCapture}
+                disabled={captureLoading || !screenPolling}
+                aria-label="캡처"
+                title="캡처"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-[6px] border border-white/12 bg-white text-ink transition hover:bg-azure-50 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {captureLoading ? <Loader2 className="animate-spin" size={15} /> : <Camera size={15} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingCameraName((value) => !value)}
+                aria-label="카메라 이름"
+                title="카메라 이름"
+                className="inline-flex h-9 items-center justify-center rounded-[6px] border border-white/12 bg-white/10 px-3 text-[12px] font-semibold text-white transition hover:bg-white/16"
+              >
+                이름 변경
+              </button>
               <button
                 type="button"
                 onClick={onRefresh}
@@ -743,7 +1154,7 @@ function VisionStage({
                 className="inline-flex h-9 items-center gap-2 rounded-[6px] border border-white/12 bg-white px-3.5 text-[13px] font-semibold text-ink shadow-soft transition hover:bg-azure-50"
               >
                 {screenPolling ? <Pause size={14} /> : <Play size={14} />}
-                {screenPolling ? "일시정지" : "화면 보기"}
+                {screenPolling ? "일시정지" : "영상 보기"}
               </button>
             </div>
           )}
@@ -775,7 +1186,27 @@ function VisionStage({
         </div>
       </div>
 
-      <div className={`border-t border-white/10 bg-[#0c1726] px-4 ${showAddressEditor ? "py-4" : "py-2.5"}`}>
+      <div className={`border-t border-white/10 bg-[#0c1726] px-4 ${showAddressEditor || editingCameraName ? "py-4" : "py-2.5"}`}>
+        {editingCameraName && mode === "stream" && (
+          <label className="mb-3 block">
+            <span className="mb-1.5 block text-[12px] font-semibold text-azure-100/70">
+              카메라 이름
+            </span>
+            <input
+              ref={cameraNameInputRef}
+              value={cameraName}
+              onChange={(event) => onChangeCameraName?.(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  setEditingCameraName(false);
+                }
+              }}
+              placeholder="예: 중앙병원 3층 복도 카메라"
+              className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 text-[13px] text-white shadow-sunk outline-none transition placeholder:text-azure-100/40 focus:border-azure-300"
+            />
+          </label>
+        )}
         {showAddressEditor ? (
           <>
             <div className="grid gap-3 xl:grid-cols-[minmax(220px,1fr)_auto]">
@@ -798,7 +1229,11 @@ function VisionStage({
                   onKeyDown={onAddressKeyDown}
                   disabled={connection.loading}
                   spellCheck={false}
-                  placeholder="10.241.134.243 또는 http://...:3000/sse"
+                  placeholder={
+                    mode === "stream"
+                      ? "10.241.134.240 또는 rtsp://...:8554/live"
+                      : "10.241.134.243 또는 http://...:3000/sse"
+                  }
                   className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 font-mono text-[13px] text-white shadow-sunk outline-none transition placeholder:text-azure-100/40 focus:border-azure-300 disabled:cursor-wait disabled:opacity-70"
                 />
               </label>
@@ -844,8 +1279,13 @@ function VisionStage({
           </>
         ) : (
           <div className="flex min-h-10 flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-2 rounded-[6px] border border-white/10 bg-white/5 px-2.5 py-1.5 text-[12px] font-semibold text-azure-100/72">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-[6px] border border-white/10 bg-white/5 px-2.5 py-1.5 text-[12px] font-semibold text-azure-100/72">
               <Wifi size={14} className="shrink-0 text-signal" />
+              {mode === "stream" && cameraName.trim() && (
+                <span className="truncate text-azure-100">
+                  {cameraName.trim()}
+                </span>
+              )}
               <span className="truncate font-mono text-[11px] text-azure-100/86">
                 {helperText}
               </span>
@@ -870,7 +1310,7 @@ function VisionStage({
                 onClick={() => onConnectUrl(url)}
                 disabled={connection.loading}
                 className={`shrink-0 rounded-[4px] border px-3 py-1.5 font-mono text-[11px] transition ${
-                  url === mcpUrl
+                  sameHuskyLensHost(url, mcpUrl)
                     ? "border-signal/50 bg-signal/12 text-signal"
                     : "border-white/12 bg-white/8 text-azure-100/70 hover:bg-white/14"
                 } disabled:cursor-wait disabled:opacity-60`}
@@ -892,6 +1332,23 @@ function VisionStage({
   );
 }
 
+const RtspStreamFrame = React.memo(function RtspStreamFrame({
+  src,
+  onError
+}: {
+  src: string;
+  onError: () => void;
+}) {
+  return (
+    <img
+      src={src}
+      alt="허스키렌즈 RTSP 영상"
+      onError={onError}
+      className="h-full w-full bg-black object-cover"
+    />
+  );
+});
+
 function ConnectionChecklist() {
   const items = [
     { icon: Power, label: "MCP Service 켜기" },
@@ -904,12 +1361,66 @@ function ConnectionChecklist() {
       {items.map(({ icon: Icon, label }) => (
         <span
           key={label}
-          className="inline-flex h-8 items-center gap-2 rounded-[4px] border border-white/12 bg-white/[0.07] px-2.5 text-[12px] font-semibold text-azure-100/76"
+          className="inline-flex h-8 items-center gap-2 rounded-[4px] border border-white/10 bg-white/[0.04] px-2.5 text-[12px] font-semibold text-azure-100/70"
         >
           <Icon size={13} />
           {label}
         </span>
       ))}
+    </div>
+  );
+}
+
+function ConnectionActions({
+  connected,
+  connectionLoading,
+  discoveryLoading,
+  screenLoading,
+  onRefresh,
+  onDiscover,
+  onEditAddress
+}: {
+  connected: boolean;
+  connectionLoading: boolean;
+  discoveryLoading: boolean;
+  screenLoading: boolean;
+  onRefresh: () => void;
+  onDiscover: () => void;
+  onEditAddress: () => void;
+}) {
+  const disabled = connectionLoading;
+
+  return (
+    <div className="mt-4 flex max-w-full flex-wrap justify-center gap-2">
+      {connected && (
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={screenLoading || disabled}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-[6px] border border-white/22 bg-white px-3.5 text-[12px] font-semibold text-ink shadow-soft transition hover:bg-azure-50 disabled:cursor-not-allowed disabled:opacity-55"
+        >
+          {screenLoading ? <Loader2 className="animate-spin" size={13} /> : <RefreshCcw size={13} />}
+          영상 다시 연결
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onDiscover}
+        disabled={discoveryLoading || disabled}
+        className="inline-flex h-9 items-center justify-center gap-2 rounded-[6px] border border-white/16 bg-white/10 px-3.5 text-[12px] font-semibold text-white transition hover:bg-white/16 disabled:cursor-not-allowed disabled:opacity-55"
+      >
+        {discoveryLoading ? <Loader2 className="animate-spin" size={13} /> : <Radar size={13} />}
+        자동 찾기
+      </button>
+      <button
+        type="button"
+        onClick={onEditAddress}
+        disabled={disabled}
+        className="inline-flex h-9 items-center justify-center gap-2 rounded-[6px] border border-white/16 bg-white/10 px-3.5 text-[12px] font-semibold text-white transition hover:bg-white/16 disabled:cursor-not-allowed disabled:opacity-55"
+      >
+        <Settings2 size={13} />
+        주소 입력
+      </button>
     </div>
   );
 }
@@ -956,10 +1467,14 @@ function CompactSettings({
 function AppHeader({
   connectedToCurrentUrl,
   showSettings,
+  mode,
+  onBackToModes,
   onToggleSettings
 }: {
   connectedToCurrentUrl: boolean;
   showSettings: boolean;
+  mode: AppMode;
+  onBackToModes: () => void;
   onToggleSettings: () => void;
 }) {
   const connected = connectedToCurrentUrl;
@@ -991,6 +1506,15 @@ function AppHeader({
       </div>
 
       <div className="flex items-center gap-2">
+        {mode !== "select" && (
+          <button
+            type="button"
+            onClick={onBackToModes}
+            className="inline-flex h-8 items-center justify-center rounded-[6px] border border-silver-200 bg-white px-3 text-[12px] font-semibold text-ink transition hover:bg-silver-50"
+          >
+            모드 선택
+          </button>
+        )}
         <button
           type="button"
           onClick={onToggleSettings}
@@ -1319,6 +1843,7 @@ const Composer = React.forwardRef<HTMLTextAreaElement, ComposerProps>(
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
+          onCompositionEnd={(event) => onChange(event.currentTarget.value)}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           placeholder={placeholderText}
@@ -1537,6 +2062,14 @@ function formatTime(ts: number) {
   return `${hh}:${mm}`;
 }
 
+function formatDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}.${day} ${formatTime(date.getTime())}`;
+}
+
 function hostFromUrl(url: string) {
   try {
     return new URL(url).host;
@@ -1545,22 +2078,51 @@ function hostFromUrl(url: string) {
   }
 }
 
-function normalizeHuskyLensUrl(value: string) {
+function hostNameFromUrl(url: string) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url.replace(/^https?:\/\//, "").split(/[/:]/)[0] || "";
+  }
+}
+
+function sameHuskyLensHost(left: string, right: string) {
+  const leftHost = hostNameFromUrl(left);
+  const rightHost = hostNameFromUrl(right);
+  return Boolean(leftHost && rightHost && leftHost === rightHost);
+}
+
+function getHuskyLensRtspProxyUrl(mcpUrl: string, tick: number) {
+  const url = new URL("/api/huskylens/rtsp.mjpeg", window.location.origin);
+  url.searchParams.set("url", mcpUrl);
+  if (tick) url.searchParams.set("_stream", String(tick));
+  return url.toString();
+}
+
+type HuskyLensUrlMode = "chat" | "stream";
+
+function normalizeHuskyLensUrl(value: string, mode: HuskyLensUrlMode = "chat") {
   const trimmed = value.trim();
   if (!trimmed) return "";
 
-  const withProtocol = /^https?:\/\//i.test(trimmed)
+  const withProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)
     ? trimmed
     : `http://${trimmed}`;
 
   try {
     const url = new URL(withProtocol);
-    if (!url.port) url.port = "3000";
-    if (url.pathname === "/" || url.pathname === "") url.pathname = "/sse";
-    return url.toString();
+    if (!url.hostname) return "";
+    const protocol = mode === "stream" ? "rtsp" : "http";
+    const port = mode === "stream" ? "8554" : "3000";
+    const path = mode === "stream" ? "/live" : "/sse";
+    return `${protocol}://${formatUrlHost(url.hostname)}:${port}${path}`;
   } catch {
     return trimmed;
   }
+}
+
+function formatUrlHost(hostname: string) {
+  return hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
 }
 
 declare global {

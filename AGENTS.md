@@ -19,7 +19,19 @@ Students clone the GitHub repository, run the app locally, connect to a HUSKYLEN
 
 Use `docs/MCP_REFERENCE.md` as the canonical local reference for observed HUSKYLENS MCP tools and current app support. The runtime also sends the connected device's raw MCP tool schema to the AI on `/api/ask`. Keep the reference file updated when adding backend routes, UI controls, or newly verified MCP operations.
 
+Before changing code that touches HUSKYLENS 2 connection, MCP tools, Wi-Fi discovery, live video, WebRTC, Janus streaming, recognition results, screenshots, photo capture, or scheduled tasks, check the relevant DFRobot HUSKYLENS 2 official documentation and reconcile it with `docs/MCP_REFERENCE.md` and the live MCP tool schema. Do not rely only on memory for these integration details.
+
+Primary DFRobot references:
+
+- HUSKYLENS 2 MCP Server: `https://wiki.dfrobot.com/sen0638/docs/22605`
+- HUSKYLENS 2 Other Built-in Functions and video streaming: `https://wiki.dfrobot.com/sen0638/docs/22606`
+- HUSKYLENS 2 Reference index, API, protocol, and pinout: `https://wiki.dfrobot.com/sen0638/docs/22607`
+- HUSKYLENS 2 product page: `https://www.dfrobot.com/huskylens/huskylens2/`
+- HUSKYLENS 2 Wi-Fi module: `https://wiki.dfrobot.com/SKU_TEL0191_HUSKYLENS_2_WiFi_Module`
+
 The live HUSKYLENS 2 MCP server uses operation-based tool arguments. Do not call tools with free-form `question` or `instruction` parameters unless the tool schema explicitly supports them.
+
+For chat requests, do not use backend keyword or regex intent detection to decide camera actions. The backend must call OpenAI first, pass the current MCP tool schema and reference context, let the AI decide whether an MCP action is needed, and only then execute the selected MCP operation. This is especially important for `take_photo` and `task_scheduler` behavior.
 
 Current observed tool behavior:
 

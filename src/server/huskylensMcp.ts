@@ -132,24 +132,39 @@ export async function callHuskyLensTool(
     throw new Error("HUSKYLENS MCP URL이 필요합니다.");
   }
   return enqueueToolCall(key, async () => {
-    const client = await getClient(key);
-    try {
-      return await withTimeout(
-        client.callTool({
-          name,
-          arguments: args
-        }),
-        options.timeoutMs ?? 12000,
-        options.timeoutMessage ??
-          `${name} 호출 시간이 초과되었습니다. HUSKYLENS 화면에서 실행 중인 앱과 Wi-Fi 상태를 확인하세요.`
-      );
-    } catch (error) {
-      if (error instanceof TimeoutError) {
-        await resetConnection(key);
-      }
-      throw error;
-    }
+    return callToolWithRetry(key, name, args, options);
   });
+}
+
+async function callToolWithRetry(
+  key: string,
+  name: string,
+  args: Record<string, unknown>,
+  options: { timeoutMs?: number; timeoutMessage?: string },
+  retried = false
+) {
+  const client = await getClient(key);
+  try {
+    return await withTimeout(
+      client.callTool({
+        name,
+        arguments: args
+      }),
+      options.timeoutMs ?? 12000,
+      options.timeoutMessage ??
+        `${name} 호출 시간이 초과되었습니다. HUSKYLENS 화면에서 실행 중인 앱과 Wi-Fi 상태를 확인하세요.`
+    );
+  } catch (error) {
+    const shouldReset =
+      error instanceof TimeoutError || getErrorText(error).includes("Session not initialized");
+    if (shouldReset) {
+      await resetConnection(key);
+      if (!retried && !(error instanceof TimeoutError)) {
+        return callToolWithRetry(key, name, args, options, true);
+      }
+    }
+    throw error;
+  }
 }
 
 export async function getRecognitionResult(
@@ -181,11 +196,14 @@ export async function getApplications(
   return normalizeMcpContent(result);
 }
 
-export async function takePhoto(url: string) {
+export async function takePhoto(
+  url: string,
+  options: { timeoutMs?: number; timeoutMessage?: string } = {}
+) {
   const result = await callHuskyLensTool(url, "multimedia_control", {
     operation: "take_photo",
     resolution: "1280x720"
-  });
+  }, options);
   return normalizeMediaPayload(url, normalizeMcpContent(result));
 }
 
@@ -202,6 +220,33 @@ export async function takeScreenshot(
       "화면 수신이 지연되고 있습니다. Wi-Fi 상태를 확인하거나 잠시 후 다시 시도하세요."
   });
   return normalizeMediaPayload(url, normalizeMcpContent(result));
+}
+
+export async function schedulePhotoTask(
+  url: string,
+  trigger: string,
+  options: { timeoutMs?: number; timeoutMessage?: string } = {}
+) {
+  const trimmedTrigger = trigger.trim();
+  if (!trimmedTrigger) {
+    throw new Error("사진을 찍을 조건을 알려주세요.");
+  }
+
+  const result = await callHuskyLensTool(url, "task_scheduler", {
+    operation: "create_task",
+    tasks: JSON.stringify([
+      {
+        trigger: trimmedTrigger,
+        handler: "take_photo"
+      }
+    ])
+  }, {
+    timeoutMs: options.timeoutMs ?? 5000,
+    timeoutMessage:
+      options.timeoutMessage ??
+      "촬영 조건을 등록하지 못했습니다. HUSKYLENS 화면과 Wi-Fi 상태를 확인하세요."
+  });
+  return normalizeMcpContent(result);
 }
 
 export async function drawText(
@@ -587,6 +632,11 @@ function formatUnknown(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function getErrorText(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return formatUnknown(error);
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

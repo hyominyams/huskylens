@@ -51,28 +51,32 @@ The app also sends the connected device's raw MCP `listTools()` schema to the AI
 ### Link Camera Screen
 
 - The main UI shows the HUSKYLENS screen as the primary surface, with chat beside it on wide screens.
-- Screen capture starts automatically after a successful HUSKYLENS connection.
-- Students can pause or resume the screen from the main screen.
-- When enabled, the app polls `/api/huskylens/screen`, which uses `multimedia_control` with `operation: "take_screenshot"`.
-- The screen route does not substitute recognition result images for the main screen, so hardware validation can verify screenshot delivery directly.
-- Background polling uses shorter timeouts than first-frame and manual refresh requests so chat requests are less likely to wait behind a slow screen refresh.
-- If a background screenshot refresh times out after a valid frame is already shown, the UI keeps the last frame visible.
-- A transient background refresh failure does not replace a valid existing frame with an error message; manual refresh and first-frame failures still surface the problem.
-- The browser schedules the next refresh after the previous refresh completes, with a short adaptive delay based on response time, so slow MCP calls do not pile up in the device queue.
-- If the HUSKYLENS address changes manually or through auto discovery while a screen request is still in flight, the browser clears the old scene state and ignores the old response so a previous device frame cannot reappear after the URL changes.
+- The app starts with a mode picker: Streaming Mode or Chat Mode.
+- RTSP video is used only in Streaming Mode.
+- MCP chat and HUSKYLENS special functions are used in Chat Mode without video streaming.
+- Students can pause or resume the RTSP video from the main screen.
+- The backend reads `rtsp://<HUSKYLENS_IP>:8554/live` with bundled `ffmpeg-static` or `FFMPEG_PATH` and exposes it to the browser as `/api/huskylens/rtsp.mjpeg`.
+- MCP remains on `http://<HUSKYLENS_IP>:3000/sse`.
+- HUSKYLENS 2 must have RTSP Streaming enabled from the Video Streaming menu.
+- `/api/stream/capture` saves a single RTSP frame to `data/captures` and records metadata in `data/captures/captures.json`.
+- `/api/stream/open-folder` opens the local capture folder.
+- `/api/huskylens/screen` remains available for bounded single-frame capture and uses `take_screenshot` first, then `take_photo` if the screenshot response has no image resource.
+- The main RTSP screen does not substitute recognition result images for the live view.
+- If the HUSKYLENS address changes manually or through auto discovery, the browser clears the old scene state so a previous device frame cannot reappear after the URL changes.
 - If the HUSKYLENS address changes while an AI answer request is still in flight, the browser cancels the pending UI update so an answer grounded in the previous device cannot appear in the new device flow.
-- The live screen badge shows the latest capture response time, and slow captures are visually distinguished without adding another student-facing control.
-- Screen polling pauses while the chat is answering, and late screen responses are ignored so the UI keeps the question's scene stable.
 - Timed-out MCP tool calls reset the client session so an unfinished device call does not leave later screen or chat requests stuck behind a stale session.
-- This is snapshot polling, not a guaranteed continuous video stream.
-- `/api/ask` reuses the latest screen snapshot when available so chat requests do not wait for an extra screenshot.
-- If the latest recognition result or screen is already available, `/api/ask` uses a shorter recognition timeout and reuses that context when recognition is slow.
+- `/api/ask` is used in Chat Mode. It uses `get_recognition_result` for LLM scene context and does not call `take_screenshot` or `take_photo` during ordinary chat.
+- If the latest recognition result is already available, `/api/ask` uses a shorter recognition timeout and reuses that context when recognition is slow.
 - Chat history is kept only for the current browser session. A new app load starts with a fresh conversation, and switching to a different HUSKYLENS URL clears the old conversation and scene context so stale camera answers are not reused.
 
 ### Ask AI About The Scene
 
-- Sends the user question, structured detection data, and the current HUSKYLENS image to OpenAI.
+- Sends the user question and structured detection data to OpenAI during ordinary chat.
+- Sends a HUSKYLENS image only when an MCP result already includes one or when the user explicitly requests a photo action.
 - Sends the current MCP raw tool schema to OpenAI so the AI can reason about device capabilities.
+- Chat requests call OpenAI first to decide whether an MCP action is needed. The backend does not use keyword or regex intent detection for photo actions.
+- If the AI selects `take_photo`, the backend calls `multimedia_control` with `operation: "take_photo"` and then asks OpenAI to write the final user-facing answer from the MCP result.
+- If the AI selects conditional capture, the backend calls `task_scheduler` with `create_task` and `handler: "take_photo"`.
 - If the HUSKYLENS image cannot be fetched, the AI receives detection data only.
 - If HUSKYLENS is not connected, the app must reject the question instead of making a camera-grounded answer.
 - Chat requests use a bounded HUSKYLENS recognition timeout. If no recent screen is available, students receive a clear retry message instead of waiting on a stalled device call.
@@ -280,8 +284,9 @@ Competition use:
 Current app status:
 
 - Photo capture is available from the backend.
-- The main student UI does not expose photo controls by default.
-- Screen linking uses `take_screenshot` only. Recognition result images are used for AI scene context, not as the main screen fallback.
+- Chat commands such as taking a photo can call the photo backend route through MCP.
+- Conditional photo commands use `task_scheduler` with `create_task` when the connected MCP server exposes that tool.
+- The main student UI uses RTSP through a local MJPEG proxy for live video. Recognition result images are used for AI scene context, not as the main screen fallback.
 
 ### `multi_algorithm_control`
 
