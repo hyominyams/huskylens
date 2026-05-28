@@ -33,6 +33,8 @@ The live HUSKYLENS 2 MCP server uses operation-based tool arguments. Do not call
 
 For chat requests, do not use backend keyword or regex intent detection to decide camera actions. The backend must call OpenAI first, pass the current MCP tool schema and reference context, let the AI decide whether an MCP action is needed, and only then execute the selected MCP operation. This is especially important for `take_photo` and `task_scheduler` behavior.
 
+For ordinary chat scene questions in Chat Mode, read `get_recognition_result` fresh on every `/api/ask` request. Do not silently reuse the previous recognition result as fallback, because the HUSKYLENS scene can change between turns.
+
 Current observed tool behavior:
 
 - `manage_applications`

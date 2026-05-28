@@ -169,16 +169,16 @@ const requiredChecks: RequiredCheck[] = [
     message: "AI 질문은 HUSKYLENS 인식 결과 읽기를 우선 시도해야 합니다."
   },
   {
-    label: "Ask reuses latest screen when recognition is slow",
+    label: "Ask reads fresh scene per question",
     file: "src/server/index.ts",
-    value: "visionContext = fallbackVisionContext;",
-    message: "이미 받은 인식 결과나 화면이 있으면 느린 인식 호출 때문에 질문이 과하게 지연되면 안 됩니다."
+    value: "mcpReadMode: \"fresh_per_question\"",
+    message: "대화모드는 매 질문마다 최신 HUSKYLENS 인식 결과를 사용해야 합니다."
   },
   {
-    label: "Ask sends latest vision context",
+    label: "Ask does not send stale vision context",
     file: "src/web/main.tsx",
-    value: "visionContext: latestVisionContext ?? recognition.data",
-    message: "프론트는 이미 받은 최신 인식 결과를 질문 요청에 함께 보내야 합니다."
+    value: "visionContext: null",
+    message: "프론트는 이전 인식 결과를 질문 요청의 현재 장면처럼 보내면 안 됩니다."
   },
   {
     label: "Ask uses OpenAI after scene",

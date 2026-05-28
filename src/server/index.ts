@@ -487,20 +487,16 @@ app.post("/api/ask", async (req, res) => {
       return;
     }
 
-    const providedVisionContext = req.body.visionContext || null;
     const providedScreenContext = req.body.screenContext || null;
-    const fallbackVisionContext = providedVisionContext || providedScreenContext;
-    const hasFallbackVisionContext = Boolean(fallbackVisionContext);
-    let visionContext: unknown;
-    try {
-      visionContext = await getRecognitionResult(req.body.huskylensUrl, {
-        timeoutMs: hasFallbackVisionContext ? 1800 : 4500,
-        timeoutMessage: "HUSKYLENS 장면 수신이 지연되고 있습니다. 카메라 화면을 확인한 뒤 다시 질문하세요."
-      });
-    } catch (error) {
-      if (!hasFallbackVisionContext) throw error;
-      visionContext = fallbackVisionContext;
-    }
+    const rawVisionContext = await getRecognitionResult(req.body.huskylensUrl, {
+      timeoutMs: 6000,
+      timeoutMessage: "HUSKYLENS 최신 장면 수신이 지연되고 있습니다. 카메라 화면을 확인한 뒤 다시 질문하세요."
+    });
+    const visionContext = {
+      ...asRecord(rawVisionContext),
+      mcpReadAt: new Date().toISOString(),
+      mcpReadMode: "fresh_per_question"
+    };
 
     const screenContext = providedScreenContext;
     const answer = await answerWithOpenAI({

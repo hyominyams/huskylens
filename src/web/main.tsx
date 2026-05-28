@@ -214,8 +214,9 @@ function App() {
   }, [messages, streamingId]);
 
   useEffect(() => {
-    if (needsApiKey) setShowSettings(true);
-  }, [needsApiKey]);
+    if (appMode === "chat" && needsApiKey) setShowSettings(true);
+    if (appMode === "stream" || appMode === "select") setShowSettings(false);
+  }, [appMode, needsApiKey]);
 
   useEffect(() => {
     if (appMode === "select") return;
@@ -494,7 +495,7 @@ function App() {
         huskylensUrl,
         openaiApiKey,
         includeScreen: false,
-        visionContext: latestVisionContext ?? recognition.data,
+        visionContext: null,
         screenContext: null,
         question: trimmed,
         history: buildConversationHistory(messages)
@@ -633,6 +634,7 @@ function App() {
           connectedToCurrentUrl={connectedToCurrentUrl}
           showSettings={showSettings}
           mode={appMode}
+          needsApiKey={needsApiKey}
           onBackToModes={() => setAppMode("select")}
           onToggleSettings={() => setShowSettings((v) => !v)}
         />
@@ -677,13 +679,6 @@ function App() {
                   if (next) setScreenFrameTick(Date.now());
                 }}
               />
-              {showSettings && (
-                <CompactSettings
-                  hasServerApiKey={hasServerApiKey}
-                  openaiApiKey={openaiApiKey}
-                  onChangeApiKey={setOpenaiApiKey}
-                />
-              )}
             </section>
             <aside className="reveal min-h-[420px] overflow-hidden rounded-[8px] panel-light lg:h-[calc(100vh-102px)]">
               <CaptureHistoryPanel
@@ -734,6 +729,7 @@ function App() {
                   hasServerApiKey={hasServerApiKey}
                   openaiApiKey={openaiApiKey}
                   onChangeApiKey={setOpenaiApiKey}
+                  onClose={() => setShowSettings(false)}
                 />
               )}
             </section>
@@ -989,6 +985,7 @@ function VisionStage({
   const connected = mode === "stream" ? Boolean(streamSourceUrl) : connectedToCurrentUrl;
   const [editingAddress, setEditingAddress] = useState(false);
   const [editingCameraName, setEditingCameraName] = useState(false);
+  const [draftCameraName, setDraftCameraName] = useState(cameraName);
   const [streamLoadFailed, setStreamLoadFailed] = useState(false);
   const addressInputRef = useRef<HTMLInputElement>(null);
   const cameraNameInputRef = useRef<HTMLInputElement>(null);
@@ -1039,6 +1036,7 @@ function VisionStage({
 
   useEffect(() => {
     if (!editingCameraName) return;
+    setDraftCameraName(cameraName);
     const timer = window.setTimeout(() => {
       cameraNameInputRef.current?.focus();
       cameraNameInputRef.current?.select();
@@ -1051,6 +1049,17 @@ function VisionStage({
     event.preventDefault();
     if (!mcpUrl.trim() || connection.loading) return;
     onConnect();
+  }
+
+  function saveCameraName() {
+    onChangeCameraName?.(draftCameraName.trim());
+    setEditingCameraName(false);
+  }
+
+  function clearCameraName() {
+    setDraftCameraName("");
+    onChangeCameraName?.("");
+    setEditingCameraName(false);
   }
 
   return (
@@ -1194,17 +1203,50 @@ function VisionStage({
             </span>
             <input
               ref={cameraNameInputRef}
-              value={cameraName}
-              onChange={(event) => onChangeCameraName?.(event.target.value)}
+              value={draftCameraName}
+              onChange={(event) => setDraftCameraName(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  setEditingCameraName(false);
+                  saveCameraName();
                 }
               }}
               placeholder="예: 중앙병원 3층 복도 카메라"
               className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 text-[13px] text-white shadow-sunk outline-none transition placeholder:text-azure-100/40 focus:border-azure-300"
             />
+            <span className="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[12px] font-medium text-azure-100/50">
+                {cameraName.trim() ? "저장됨" : "이름 없음"}
+              </span>
+              <span className="flex items-center gap-2">
+                {cameraName.trim() && (
+                  <button
+                    type="button"
+                    onClick={clearCameraName}
+                    className="inline-flex h-8 items-center justify-center rounded-[6px] border border-white/16 px-3 text-[12px] font-semibold text-azure-100/80 transition hover:bg-white/8"
+                  >
+                    삭제
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftCameraName(cameraName);
+                    setEditingCameraName(false);
+                  }}
+                  className="inline-flex h-8 items-center justify-center rounded-[6px] border border-white/16 px-3 text-[12px] font-semibold text-azure-100/80 transition hover:bg-white/8"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  onClick={saveCameraName}
+                  className="inline-flex h-8 items-center justify-center rounded-[6px] bg-white px-3.5 text-[12px] font-semibold text-ink transition hover:bg-azure-50"
+                >
+                  저장
+                </button>
+              </span>
+            </span>
           </label>
         )}
         {showAddressEditor ? (
@@ -1249,22 +1291,24 @@ function VisionStage({
                 </button>
                 <button
                   type="button"
-                  onClick={onConnect}
+                  onClick={() => {
+                    onNormalizeUrl();
+                    onConnect();
+                    if (mode === "stream" || connected) setEditingAddress(false);
+                  }}
                   disabled={connection.loading || !mcpUrl.trim()}
                   className="inline-flex h-10 items-center justify-center gap-2 rounded-[6px] bg-white px-5 text-[13px] font-semibold text-ink shadow-soft transition hover:bg-azure-50 disabled:opacity-60"
                 >
                   {connection.loading ? <Loader2 className="animate-spin" size={14} /> : <Zap size={14} />}
-                  {connection.loading ? "연결 중" : connected ? "재연결" : "연결"}
+                  {connection.loading ? "연결 중" : connected ? "저장 후 재연결" : "저장 후 연결"}
                 </button>
-                {connected && (
-                  <button
-                    type="button"
-                    onClick={() => setEditingAddress(false)}
-                    className="inline-flex h-10 items-center justify-center rounded-[6px] border border-white/16 px-4 text-[13px] font-semibold text-azure-100/75 transition hover:bg-white/8"
-                  >
-                    닫기
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setEditingAddress(false)}
+                  className="inline-flex h-10 items-center justify-center rounded-[6px] border border-white/16 px-4 text-[13px] font-semibold text-azure-100/75 transition hover:bg-white/8"
+                >
+                  닫기
+                </button>
               </div>
             </div>
 
@@ -1428,37 +1472,105 @@ function ConnectionActions({
 function CompactSettings({
   hasServerApiKey,
   openaiApiKey,
-  onChangeApiKey
+  onChangeApiKey,
+  onClose
 }: {
   hasServerApiKey: boolean;
   openaiApiKey: string;
   onChangeApiKey: (v: string) => void;
+  onClose: () => void;
 }) {
+  const [draftKey, setDraftKey] = useState(openaiApiKey);
+  const saved = Boolean(openaiApiKey.trim());
+
+  function saveKey() {
+    onChangeApiKey(draftKey.trim());
+    onClose();
+  }
+
+  function clearKey() {
+    setDraftKey("");
+    onChangeApiKey("");
+  }
+
   return (
     <div className="absolute right-4 top-16 z-20 w-[min(420px,calc(100%-32px))] rounded-[8px] border border-white/14 bg-[#101b2b] p-4 text-white shadow-elevated">
-      <div className="mb-3 flex items-center gap-2">
-        <Settings2 size={16} className="text-azure-200" />
-        <h2 className="text-[14px] font-semibold">API 키</h2>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Settings2 size={16} className="text-azure-200" />
+          <h2 className="text-[14px] font-semibold">API 키</h2>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="닫기"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-white/14 text-azure-100/80 transition hover:bg-white/8"
+        >
+          <X size={14} />
+        </button>
       </div>
       {!hasServerApiKey && (
-        <label className="block">
-          <span className="mb-1.5 block text-[12px] font-semibold text-azure-100/70">
-            API 키
-          </span>
-          <input
-            value={openaiApiKey}
-            onChange={(event) => onChangeApiKey(event.target.value)}
-            placeholder="sk-..."
-            type="password"
-            className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 font-mono text-[12px] text-white outline-none placeholder:text-azure-100/40 focus:border-azure-300"
-          />
-        </label>
+        <>
+          <label className="block">
+            <span className="mb-1.5 block text-[12px] font-semibold text-azure-100/70">
+              API 키
+            </span>
+            <input
+              value={draftKey}
+              onChange={(event) => setDraftKey(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  saveKey();
+                }
+              }}
+              placeholder="sk-..."
+              type="password"
+              className="h-10 w-full rounded-[6px] border border-white/20 bg-[#111d2d] px-3.5 font-mono text-[12px] text-white outline-none placeholder:text-azure-100/40 focus:border-azure-300"
+            />
+          </label>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <span className={`text-[12px] font-semibold ${saved ? "text-signal" : "text-azure-100/55"}`}>
+              {saved ? "저장됨" : "저장 전"}
+            </span>
+            <div className="flex items-center gap-2">
+              {saved && (
+                <button
+                  type="button"
+                  onClick={clearKey}
+                  className="inline-flex h-9 items-center justify-center rounded-[6px] border border-white/16 px-3 text-[12px] font-semibold text-azure-100/80 transition hover:bg-white/8"
+                >
+                  삭제
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={saveKey}
+                disabled={!draftKey.trim()}
+                className="inline-flex h-9 items-center justify-center rounded-[6px] bg-white px-4 text-[12px] font-semibold text-ink transition hover:bg-azure-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                저장
+              </button>
+            </div>
+          </div>
+        </>
       )}
       {hasServerApiKey && (
-        <div className="flex items-center gap-2 rounded-[6px] border border-signal/30 bg-signal/10 px-3 py-2 text-[12px] font-semibold text-signal">
-          <Check size={14} />
-          API 키 준비됨
-        </div>
+        <>
+          <div className="flex items-center gap-2 rounded-[6px] border border-signal/30 bg-signal/10 px-3 py-2 text-[12px] font-semibold text-signal">
+            <Check size={14} />
+            API 키 준비됨
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-9 items-center justify-center rounded-[6px] bg-white px-4 text-[12px] font-semibold text-ink transition hover:bg-azure-50"
+            >
+              확인
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1468,12 +1580,14 @@ function AppHeader({
   connectedToCurrentUrl,
   showSettings,
   mode,
+  needsApiKey,
   onBackToModes,
   onToggleSettings
 }: {
   connectedToCurrentUrl: boolean;
   showSettings: boolean;
   mode: AppMode;
+  needsApiKey: boolean;
   onBackToModes: () => void;
   onToggleSettings: () => void;
 }) {
@@ -1515,14 +1629,21 @@ function AppHeader({
             모드 선택
           </button>
         )}
-        <button
-          type="button"
-          onClick={onToggleSettings}
-          aria-label="설정 패널"
-          className="lift relative inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-silver-200 bg-white text-ink transition hover:bg-silver-50"
-        >
-          {showSettings ? <X size={15} /> : <Settings2 size={15} />}
-        </button>
+        {mode === "chat" && (
+          <button
+            type="button"
+            onClick={onToggleSettings}
+            aria-label="API 키"
+            className={`lift relative inline-flex h-8 items-center justify-center gap-2 rounded-[6px] border px-2.5 text-[12px] font-semibold transition ${
+              needsApiKey
+                ? "border-alert/30 bg-alert/8 text-alert-deep"
+                : "border-silver-200 bg-white text-ink hover:bg-silver-50"
+            }`}
+          >
+            {showSettings ? <X size={15} /> : <Settings2 size={15} />}
+            <span className="hidden sm:inline">API 키</span>
+          </button>
+        )}
       </div>
     </header>
   );

@@ -77,6 +77,7 @@ The app also sends the connected device's raw MCP `listTools()` schema to the AI
 - Chat requests call OpenAI first to decide whether an MCP action is needed. The backend does not use keyword or regex intent detection for photo actions.
 - If the AI selects `take_photo`, the backend calls `multimedia_control` with `operation: "take_photo"` and then asks OpenAI to write the final user-facing answer from the MCP result.
 - If the AI selects conditional capture, the backend calls `task_scheduler` with `create_task` and `handler: "take_photo"`.
+- If the AI selects no device action, `/api/ask` reads `get_recognition_result` fresh for that question and marks the context with `mcpReadAt`. It does not silently reuse the previous recognition result.
 - If the HUSKYLENS image cannot be fetched, the AI receives detection data only.
 - If HUSKYLENS is not connected, the app must reject the question instead of making a camera-grounded answer.
 - Chat requests use a bounded HUSKYLENS recognition timeout. If no recent screen is available, students receive a clear retry message instead of waiting on a stalled device call.
